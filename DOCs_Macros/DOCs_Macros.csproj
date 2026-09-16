@@ -1,0 +1,44 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 1. Целевая платформа фреймворка, на которой работает T-FLEX DOCs 18 -->
+    <TargetFramework>net472</TargetFramework>
+
+    <!-- Включаем режим исполняемой программы (исправляет ошибку) -->
+    <OutputType>Exe</OutputType>
+
+    <!-- В проекте есть отдельный инструмент ApiDumper с собственным Main. -->
+    <StartupObject>Program</StartupObject>
+
+    <!-- 2. Включаем свежий синтаксис языка C# (интерполяция строк, сопоставление с образцом и т.д.) -->
+    <LangVersion>latest</LangVersion>
+
+    <!-- 3. Отключаем строгую проверку на null (чтобы компилятор вел себя точь-в-точь как внутри редактора T-FLEX DOCs) -->
+    <Nullable>disable</Nullable>
+
+    <!-- 4. Глушим системные предупреждения MSBuild:
+         MSB3246 - пропуск нативных C++ dll без метаданных .NET
+         MSB3243, MSB3277 - предупреждения о расхождениях в версиях сторонних САПР-библиотек -->
+    <NoWarn>$(NoWarn);MSB3246;MSB3243;MSB3277</NoWarn>
+
+    <!-- 5. ЕДИНСТВЕННЫЙ ПУТЬ К УСТАНОВЛЕННОМУ КЛИЕНТУ T-FLEX DOCS:
+         Если папка программы когда-либо изменится, путь правится только в этой строке -->
+    <TFlexPath>C:\Program Files (x86)\T-FLEX DOCs 18 (18ReleaseOAK)\Program</TFlexPath>
+  </PropertyGroup>
+
+  <!-- 6. ПОДКЛЮЧЕНИЕ ВСЕХ БИБЛИОТЕК ИЗ ПАПКИ T-FLEX DOCS -->
+  <ItemGroup>
+    <Reference Include="Microsoft.CSharp" />
+    <!-- Захватываем абсолютно все .dll файлы из каталога программы, 
+         но исключаем старый дубликат SolidEdge (Interop.SolidEdgeConstants.dll), чтобы убрать спам в логе -->
+    <Reference Include="$(TFlexPath)\*.dll" Exclude="$(TFlexPath)\Interop.SolidEdgeConstants.dll">
+      <!-- Запрещаем компилятору копировать сотни мегабайт библиотек DOCs в папку bin/Debug при каждой сборке -->
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="StopRunningDocsMacros" BeforeTargets="PrepareForBuild">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;Get-Process -Name 'DOCs_Macros' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*\DOCs_Macros\bin\Debug\net472\DOCs_Macros.exe' } | Stop-Process -Force; exit 0&quot;" />
+  </Target>
+
+</Project>

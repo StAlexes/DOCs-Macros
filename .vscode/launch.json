@@ -1,0 +1,11 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Прикрепиться к T-FLEX DOCs (.NET Framework)",
+      "type": "clr",
+      "request": "attach",
+      "processId": "${command:pickProcess}"
+    }
+  ]
+}
