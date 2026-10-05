@@ -32,6 +32,8 @@ public class XmiSchemaExporterMacro : MacroProvider
         public ТипОбъекта[] Types { get; set; } = new ТипОбъекта[0];
         /// <summary>Параметры справочника, выбранные для включения в экспорт.</summary>
         public List<ParameterInfo> Parameters { get; set; } = new List<ParameterInfo>();
+        /// <summary>Отдельно выбранные параметры группы структурного подключения.</summary>
+        public List<ParameterInfo> ConnectionParameters { get; set; } = new List<ParameterInfo>();
         /// <summary>Найденная DOCs группа структурных подключений сложной иерархии.</summary>
         public object ConnectionGroup { get; set; }
     }
@@ -47,7 +49,20 @@ public class XmiSchemaExporterMacro : MacroProvider
         public SelectedCatalogContext Slave { get; set; }
         /// <summary>Признак, что связь относится к группе структурных подключений каталога.</summary>
         public bool IsConnectionRelation { get; set; }
-        /// <summary>Уникальный ключ флажка связи в диалоге.</summary>
+    }
+
+    /// <summary>Контекстное представление связи, полученное при опросе одного справочника.</summary>
+    private class CatalogRelationItem
+    {
+        /// <summary>Группа связи DOCs с именем в контексте опрашиваемого справочника.</summary>
+        public ParameterGroup Link { get; set; }
+        /// <summary>Справочник, у которого запрошена связь.</summary>
+        public SelectedCatalogContext SourceCatalog { get; set; }
+        /// <summary>Связанный справочник, являющийся целью связи.</summary>
+        public SelectedCatalogContext TargetCatalog { get; set; }
+        /// <summary>Признак связи, полученной из группы структурного подключения.</summary>
+        public bool IsConnectionRelation { get; set; }
+        /// <summary>Ключ флажка для чтения выбора из диалога.</summary>
         public string DialogKey { get; set; }
     }
 
@@ -110,6 +125,8 @@ public class XmiSchemaExporterMacro : MacroProvider
         public string SourceUpper { get; set; } = "1";
         public string TargetLower { get; set; } = "1";
         public string TargetUpper { get; set; } = "1";
+        /// <summary>Направление ассоциации для отображения Enterprise Architect.</summary>
+        public string Direction { get; set; }
     }
 
     /// <summary>Ассоциация EA, связывающая компонент справочника с UML-классом его типа.</summary>
@@ -180,12 +197,18 @@ public class XmiSchemaExporterMacro : MacroProvider
             if (types.Length > 0)
             {
                 var parameters = SelectParameters(reference, $"Шаг 3: Выберите параметры справочника '{referenceName}'");
+                var connectionGroup = FindConnectionGroup(reference);
+                var connectionParameters = connectionGroup != null
+                    ? SelectConnectionParameters(reference, connectionGroup,
+                        $"Шаг 3.1: Выберите параметры подключения для '{referenceName}'")
+                    : new List<ParameterInfo>();
                 selectedCatalogs.Add(new SelectedCatalogContext
                 {
                     Reference = reference,
                     Types = types,
                     Parameters = parameters,
-                    ConnectionGroup = FindConnectionGroup(reference)
+                    ConnectionGroup = connectionGroup,
+                    ConnectionParameters = connectionParameters
                 });
             }
 
@@ -351,7 +374,7 @@ public class XmiSchemaExporterMacro : MacroProvider
         {
             foreach (var link in GetLinksFromOwner(source.Description))
             {
-                var target = link?.SlaveGroup?.ReferenceInfo;
+                var target = GetSlaveReference(link);
                 if (target == null || target.Guid == source.Guid) continue;
 
                 if (cache.TryGetValue(source.Guid, out var outgoing)) outgoing.Add(target.Guid);
@@ -451,27 +474,56 @@ public class XmiSchemaExporterMacro : MacroProvider
 
         var groups = reference.Description.GetAllGroups()?.Where(group => group != null).ToList()
                      ?? new List<ParameterGroup>();
-        var connectionGroup = FindConnectionGroup(reference) as ParameterGroup;
-        if (connectionGroup != null && groups.All(group => group.Guid != connectionGroup.Guid))
-            groups.Add(connectionGroup);
-
-        var connectionParameters = GetEnumerableProperty(FindConnectionGroup(reference), "Parameters")
-            .OfType<ParameterInfo>();
+        var connectionGroup = FindConnectionGroup(reference);
+        Guid connectionGroupGuid = ReadGuid(connectionGroup, "Guid", "GUID", "GroupGuid");
         var parameters = groups
+            .Where(group => !ReferenceEquals(group, connectionGroup) &&
+                            (connectionGroupGuid == Guid.Empty || group.Guid != connectionGroupGuid))
             .SelectMany(group => group.Parameters ?? Enumerable.Empty<ParameterInfo>())
-            .Concat(connectionParameters)
             .Where(p => p != null && p.IsVisible)
             .GroupBy(p => p.Guid)
             .Select(group => group.First())
             .ToList();
-        if (parameters.Count == 0) return new List<ParameterInfo>();
+        return ShowParameterSelectionDialog(reference, parameters, title, "[v] Выбрать все параметры");
+    }
+
+    /// <summary>Показывает отдельный диалог выбора только параметров группы подключения.</summary>
+    /// <param name="reference">Справочник, чьи параметры подключения выбираются.</param>
+    /// <param name="connectionGroup">Найденная группа подключения сложной иерархии.</param>
+    /// <param name="title">Заголовок отдельного диалога.</param>
+    /// <returns>Выбранные видимые параметры подключения или пустой список.</returns>
+    private List<ParameterInfo> SelectConnectionParameters(ReferenceInfo reference, object connectionGroup, string title)
+    {
+        if (reference == null || connectionGroup == null) return new List<ParameterInfo>();
+
+        var parameters = GetEnumerableProperty(connectionGroup, "Parameters")
+            .OfType<ParameterInfo>()
+            .Where(parameter => parameter.IsVisible)
+            .GroupBy(parameter => parameter.Guid)
+            .Select(group => group.First())
+            .ToList();
+        return ShowParameterSelectionDialog(reference, parameters, title, "[v] Выбрать все параметры подключения");
+    }
+
+    /// <summary>Строит единый диалог с мастер-флажком, флажками групп и отдельными параметрами.</summary>
+    /// <param name="reference">Справочник для порядка групп; может отсутствовать для изолированной группы.</param>
+    /// <param name="parameters">Только параметры, разрешённые для текущего диалога.</param>
+    /// <param name="title">Заголовок диалога выбора.</param>
+    /// <param name="selectAllKey">Подпись мастер-флажка, соответствующая типу параметров.</param>
+    /// <returns>Отмеченные параметры без повторов по GUID.</returns>
+    private List<ParameterInfo> ShowParameterSelectionDialog(
+        ReferenceInfo reference,
+        List<ParameterInfo> parameters,
+        string title,
+        string selectAllKey)
+    {
+        if (parameters == null || parameters.Count == 0) return new List<ParameterInfo>();
 
         var dlg = СоздатьДиалогВвода(title);
         dlg.Высота = 700;
         dlg.Ширина = 620;
         dlg.ОтобразитьПолосыПрокрутки(true, false);
 
-        const string selectAllKey = "[v] Выбрать все параметры";
         dlg.ДобавитьФлаг(selectAllKey, false);
 
         var parameterGroups = parameters
@@ -483,7 +535,9 @@ public class XmiSchemaExporterMacro : MacroProvider
                 Parameters = group.OrderBy(parameter => parameter.Name, StringComparer.CurrentCultureIgnoreCase).ToList()
             })
             .ToList();
-        Guid? primaryGroupGuid = GetPrimaryGroupGuid(reference, parameterGroups.Select(item => item.Group));
+        Guid? primaryGroupGuid = reference == null
+            ? (Guid?)null
+            : GetPrimaryGroupGuid(reference, parameterGroups.Select(item => item.Group));
         var orderedGroups = parameterGroups
             .OrderByDescending(item => primaryGroupGuid.HasValue && item.Group?.Guid == primaryGroupGuid.Value)
             .ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
@@ -595,61 +649,76 @@ public class XmiSchemaExporterMacro : MacroProvider
     private List<SelectedRelation> SelectRelations(List<SelectedCatalogContext> catalogs)
     {
         var selectedReferenceGuids = catalogs.Select(item => item.Reference.Guid).ToHashSet();
-        var candidates = new List<SelectedRelation>();
+        var itemsByCatalog = new List<CatalogRelationItem>();
 
-        foreach (var master in catalogs)
+        // Опрос каждого справочника отдельно нужен для получения локального link.Name.
+        foreach (var currentCatalog in catalogs)
         {
-            var owners = new[] { master.Reference.Description, master.ConnectionGroup }
+            var owners = new[] { currentCatalog.Reference.Description, currentCatalog.ConnectionGroup }
                 .Where(owner => owner != null)
                 .Distinct()
                 .ToList();
+
             foreach (var owner in owners)
             {
-                bool isConnectionRelation = master.ConnectionGroup != null && ReferenceEquals(owner, master.ConnectionGroup);
+                bool isConnection = currentCatalog.ConnectionGroup != null && ReferenceEquals(owner, currentCatalog.ConnectionGroup);
                 foreach (var link in GetLinksFromOwner(owner))
                 {
-                    var slaveReference = link?.SlaveGroup?.ReferenceInfo;
-                    if (slaveReference == null || !selectedReferenceGuids.Contains(slaveReference.Guid) || slaveReference.Guid == master.Reference.Guid)
+                    var targetRef = GetSlaveReference(link);
+                    if (targetRef == null || !selectedReferenceGuids.Contains(targetRef.Guid) || targetRef.Guid == currentCatalog.Reference.Guid)
                         continue;
 
-                    var slave = catalogs.FirstOrDefault(item => item.Reference.Guid == slaveReference.Guid);
-                    if (slave == null) continue;
+                    var targetCatalog = catalogs.FirstOrDefault(item => item.Reference.Guid == targetRef.Guid);
+                    if (targetCatalog == null) continue;
 
-                    bool duplicate = candidates.Any(candidate => candidate.Master.Reference.Guid == master.Reference.Guid &&
-                        candidate.Slave.Reference.Guid == slave.Reference.Guid && candidate.Link.Guid == link.Guid);
-                    if (!duplicate)
-                        candidates.Add(new SelectedRelation
-                        {
-                            Link = link,
-                            Master = master,
-                            Slave = slave,
-                            IsConnectionRelation = isConnectionRelation
-                        });
+                    itemsByCatalog.Add(new CatalogRelationItem
+                    {
+                        Link = link,
+                        SourceCatalog = currentCatalog,
+                        TargetCatalog = targetCatalog,
+                        IsConnectionRelation = isConnection
+                    });
                 }
             }
         }
 
-        if (candidates.Count == 0)
+        if (itemsByCatalog.Count == 0)
         {
             Сообщение("Информация", "Связи между выбранными справочниками не найдены.");
-            return candidates;
+            return new List<SelectedRelation>();
         }
 
         var dlg = СоздатьДиалогВвода("Шаг 4: Выберите связи между справочниками");
+        dlg.ОтобразитьПолосыПрокрутки(true, false);
         var usedKeys = new HashSet<string>(StringComparer.Ordinal);
-        var linkKeys = new Dictionary<SelectedRelation, string>();
-        foreach (var group in candidates.GroupBy(item => item.Master.Reference.Name)
+        var itemKeys = new Dictionary<CatalogRelationItem, string>();
+
+        foreach (var group in itemsByCatalog.GroupBy(item => item.SourceCatalog.Reference.Name)
                      .OrderBy(group => group.Key, StringComparer.CurrentCultureIgnoreCase))
         {
             dlg.ДобавитьГруппу(group.Key);
-            foreach (var relation in group.OrderBy(item => item.Link.Name, StringComparer.CurrentCultureIgnoreCase))
+
+            // В одном справочнике один GUID должен давать только один флажок.
+            var uniqueInGroup = group
+                .GroupBy(item => item.Link.Guid)
+                .Select(linkGroup => linkGroup.First());
+
+            foreach (var item in uniqueInGroup.OrderBy(item => item.Link.Name, StringComparer.CurrentCultureIgnoreCase))
             {
-                string label = $"{relation.Link.Name} [{relation.Master.Reference.Name} -> {relation.Slave.Reference.Name}]";
-                string comment = GetObjectComment(relation.Link);
-                if (!string.IsNullOrWhiteSpace(comment)) label += $" [{comment}]";
+                string sourceName = item.IsConnectionRelation
+                    ? $"{item.SourceCatalog.Reference.Name} (Подключение)"
+                    : item.SourceCatalog.Reference.Name;
+
+                // DOCs возвращает настроенное имя связи со стороны опрашиваемого справочника.
+                string label = $"{item.Link.Name} [{sourceName} -> {item.TargetCatalog.Reference.Name}]";
+                string comment = GetObjectComment(item.Link);
+                if (!string.IsNullOrWhiteSpace(comment))
+                    label += $" [{comment}]";
+                label += $" {{{item.Link.Guid}}}";
+
                 string key = MakeUniqueDialogKey(label, usedKeys);
-                relation.DialogKey = key;
-                linkKeys[relation] = key;
+                item.DialogKey = key;
+                itemKeys[item] = key;
                 dlg.ДобавитьФлаг(key, false);
             }
         }
@@ -657,8 +726,23 @@ public class XmiSchemaExporterMacro : MacroProvider
         var chosen = new List<SelectedRelation>();
         if (dlg.Показать())
         {
-            foreach (var relation in candidates)
-                if (GetDialogFlag(dlg, linkKeys[relation])) chosen.Add(relation);
+            var selectedItems = itemsByCatalog
+                .Where(item => itemKeys.TryGetValue(item, out var key) && GetDialogFlag(dlg, key))
+                .ToList();
+            var handledGuids = new HashSet<Guid>();
+
+            foreach (var item in selectedItems)
+            {
+                if (!handledGuids.Add(item.Link.Guid)) continue;
+
+                chosen.Add(new SelectedRelation
+                {
+                    Link = item.Link,
+                    Master = item.SourceCatalog,
+                    Slave = item.TargetCatalog,
+                    IsConnectionRelation = item.IsConnectionRelation
+                });
+            }
         }
         return chosen;
     }
@@ -716,7 +800,7 @@ public class XmiSchemaExporterMacro : MacroProvider
             // Источник должен содержать связь в собственных группах параметров.
             var masterClasses = classesByReferenceGuid[link.Master.Reference.Guid]
                 .Where(classModel => link.IsConnectionRelation
-                    ? classModel.IsConnection && IsLinkAttachedToMasterClass(classModel, link.Link)
+                    ? classModel.IsConnection
                     : !classModel.IsConnection && IsLinkAttachedToMasterClass(classModel, link.Link))
                 .ToList();
 
@@ -1060,8 +1144,10 @@ public class XmiSchemaExporterMacro : MacroProvider
     {
         if (owner == null) yield break;
 
+        var seenGuids = new HashSet<Guid>();
         foreach (var link in GetEnumerableProperty(owner, "Links").OfType<ParameterGroup>())
-            yield return link;
+            if (seenGuids.Add(link.Guid))
+                yield return link;
 
         object methodResult = null;
         bool methodFailed = false;
@@ -1079,9 +1165,18 @@ public class XmiSchemaExporterMacro : MacroProvider
         if (methodResult is System.Collections.IEnumerable links)
         {
             foreach (var link in links)
-                if (link is ParameterGroup parameterGroup)
+                if (link is ParameterGroup parameterGroup && seenGuids.Add(parameterGroup.Guid))
                     yield return parameterGroup;
         }
+    }
+
+    /// <summary>Безопасно получает справочник Slave через необязательную группу конца связи.</summary>
+    /// <param name="link">Группа связи, у которой может отсутствовать SlaveGroup.</param>
+    /// <returns>Справочник Slave или null, если группа/свойство/справочник недоступны.</returns>
+    private static ReferenceInfo GetSlaveReference(ParameterGroup link)
+    {
+        object slaveGroup = GetPropertyValue(link, "SlaveGroup");
+        return GetPropertyValue(slaveGroup, "ReferenceInfo") as ReferenceInfo;
     }
 
     /// <summary>Безопасно читает публичное свойство API через reflection.</summary>
@@ -1294,11 +1389,15 @@ public class XmiSchemaExporterMacro : MacroProvider
         var connectors = new XElement("connectors");
         foreach (var a in assocs)
         {
+            var properties = new XElement("properties", new XAttribute("ea_type", "Association"));
+            if (!string.IsNullOrWhiteSpace(a.Direction))
+                properties.Add(new XAttribute("direction", a.Direction));
+
             connectors.Add(new XElement("connector", new XAttribute(xmi + "idref", a.AssocGuid),
                 new XAttribute("name", a.Name ?? string.Empty),
                 new XElement("source", new XAttribute(xmi + "idref", a.SourceClassGuid)),
                 new XElement("target", new XAttribute(xmi + "idref", a.TargetClassGuid)),
-                new XElement("properties", new XAttribute("ea_type", "Association"))
+                properties
             ));
         }
         foreach (var association in catalogTypeAssocs)
@@ -1498,7 +1597,7 @@ public class XmiSchemaExporterMacro : MacroProvider
                 Comment = GetObjectComment(connectionGroup)
             };
 
-            foreach (var parameter in context.Parameters.Where(parameter => IsParameterAttachedToType(parameter, connectionGroup, connectionGroup)))
+            foreach (var parameter in context.ConnectionParameters ?? new List<ParameterInfo>())
             {
                 var (typeRef, eaType) = MapType(parameter.Type);
                 connection.Parameters.Add(new ParamModel { Name = parameter.Name, TypeRef = typeRef, EaType = eaType });
@@ -1675,6 +1774,7 @@ public class XmiSchemaExporterMacro : MacroProvider
         var association = new AssocModel
         {
             Name = associationName,
+            // Стрелка начинается у подключения и направлена к объекту справочника.
             SourceClassGuid = connectionClass.Guid,
             SourceClassName = connectionClass.Name,
             TargetClassGuid = objectClass.Guid,
@@ -1682,7 +1782,8 @@ public class XmiSchemaExporterMacro : MacroProvider
             SourceLower = "0",
             SourceUpper = "*",
             TargetLower = "1",
-            TargetUpper = "1"
+            TargetUpper = "1",
+            Direction = "Source -> Destination"
         };
         connectionClass.Associations.Add(association);
         allAssocs.Add(association);
