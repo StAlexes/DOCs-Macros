@@ -31,6 +31,8 @@ public class XmiSchemaExporterMacro : MacroProvider
         public ТипОбъекта[] Types { get; set; } = new ТипОбъекта[0];
         /// <summary>Параметры справочника, выбранные для включения в экспорт.</summary>
         public List<ParameterInfo> Parameters { get; set; } = new List<ParameterInfo>();
+        /// <summary>Найденная DOCs группа структурных подключений сложной иерархии.</summary>
+        public object ConnectionGroup { get; set; }
     }
 
     /// <summary>Связь DOCs с однозначно определёнными каталогами master и slave.</summary>
@@ -42,6 +44,8 @@ public class XmiSchemaExporterMacro : MacroProvider
         public SelectedCatalogContext Master { get; set; }
         /// <summary>Контекст целевого каталога (slave) связи.</summary>
         public SelectedCatalogContext Slave { get; set; }
+        /// <summary>Признак, что связь относится к группе структурных подключений каталога.</summary>
+        public bool IsConnectionRelation { get; set; }
         /// <summary>Уникальный ключ флажка связи в диалоге.</summary>
         public string DialogKey { get; set; }
     }
@@ -54,6 +58,10 @@ public class XmiSchemaExporterMacro : MacroProvider
         public string Comment { get; set; }
         public string CatalogGuid { get; set; }
         public object SourceClass { get; set; }
+        /// <summary>Исходный тип DOCs или pseudo-object, использованный для фильтрации параметров и связей.</summary>
+        public object SourceType { get; set; }
+        /// <summary>Указывает, что класс является псевдотипом структурного подключения.</summary>
+        public bool IsConnection { get; set; }
         public List<ParamModel> Parameters { get; set; } = new List<ParamModel>();
         public List<AssocModel> Associations { get; set; } = new List<AssocModel>();
     }
@@ -121,12 +129,43 @@ public class XmiSchemaExporterMacro : MacroProvider
     public override void Run()
     {
         var selectedCatalogs = new List<SelectedCatalogContext>();
+        var allReferences = Context.Connection.ReferenceCatalog.GetReferences()
+            .Where(reference => reference != null)
+            .ToList();
+        var linkedReferenceGuids = BuildReferenceLinkCache(allReferences);
+
         while (true)
         {
+            bool onlyLinked = false;
+            if (selectedCatalogs.Count > 0)
+            {
+                bool? addMore = QuestionWithCancel(BuildAddMoreTypesPrompt(selectedCatalogs));
+                if (addMore != true) break;
+
+                string selectedCatalogNames = string.Join(", ", selectedCatalogs.Select(item => item.Reference.Name));
+                bool? searchOnlyLinked = QuestionWithCancel(
+                    $"Искать следующий справочник только среди связанных с уже выбранными ({selectedCatalogNames})?");
+                if (!searchOnlyLinked.HasValue) break;
+                onlyLinked = searchOnlyLinked.Value;
+            }
+
+            var excludedGuids = new HashSet<Guid>(selectedCatalogs.Select(item => item.Reference.Guid));
+            IEnumerable<ReferenceInfo> candidates = allReferences.Where(reference => !excludedGuids.Contains(reference.Guid));
+            if (onlyLinked)
+            {
+                var allowedGuids = new HashSet<Guid>();
+                foreach (Guid selectedGuid in excludedGuids)
+                    if (linkedReferenceGuids.TryGetValue(selectedGuid, out var neighbors))
+                        allowedGuids.UnionWith(neighbors);
+                candidates = candidates.Where(reference => allowedGuids.Contains(reference.Guid));
+            }
+
             string title = $"Шаг 1: Выберите справочник ({selectedCatalogs.Count + 1})";
-            string referenceName = SelectReference(title, selectedCatalogs.Select(item => item.Reference.Guid).ToHashSet());
-            if (string.IsNullOrWhiteSpace(referenceName))
-                break;
+            string referenceName = SelectReference(
+                title,
+                candidates.ToList(),
+                useNativePicker: !onlyLinked);
+            if (string.IsNullOrWhiteSpace(referenceName)) break;
 
             var reference = Context.Connection.ReferenceCatalog.Find(referenceName);
             if (reference == null)
@@ -144,7 +183,8 @@ public class XmiSchemaExporterMacro : MacroProvider
                 {
                     Reference = reference,
                     Types = types,
-                    Parameters = parameters
+                    Parameters = parameters,
+                    ConnectionGroup = FindConnectionGroup(reference)
                 });
             }
 
@@ -154,10 +194,6 @@ public class XmiSchemaExporterMacro : MacroProvider
                 if (tryAgain != true) return;
                 continue;
             }
-
-            bool? addMore = QuestionWithCancel("Добавить еще типы из справочника?");
-            if (addMore != true)
-                break;
         }
 
         if (selectedCatalogs.Count == 0)
@@ -170,22 +206,224 @@ public class XmiSchemaExporterMacro : MacroProvider
         GenerateXmiFile(selectedCatalogs, selectedRelations);
     }
 
-    /// <summary>Показывает выбор справочника и исключает каталоги, уже выбранные в текущем запуске.</summary>
+    /// <summary>Показывает штатный выбор справочника и при необходимости использует список-кандидатов.</summary>
     /// <param name="title">Заголовок диалога выбора справочника.</param>
-    /// <param name="excludedReferenceGuids">GUID ранее выбранных справочников.</param>
+    /// <param name="candidates">Справочники, разрешённые на текущем шаге выбора.</param>
     /// <returns>Имя выбранного каталога или null при отмене/отсутствии вариантов.</returns>
-    private string SelectReference(string title, HashSet<Guid> excludedReferenceGuids)
+    private string SelectReference(string title, IList<ReferenceInfo> candidates, bool useNativePicker)
     {
-        var refs = Context.Connection.ReferenceCatalog.GetReferences()
-            .Where(reference => reference != null && !excludedReferenceGuids.Contains(reference.Guid))
-            .Select(reference => reference.Name)
-            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
-            .ToArray();
-        if (refs.Length == 0) return null;
+        var references = candidates?.Where(reference => reference != null).ToList() ?? new List<ReferenceInfo>();
+        if (references.Count == 0) return null;
 
-        var dlg = СоздатьДиалогВвода(title);
-        dlg.ДобавитьВыборИзСписка("Справочник", refs);
-        return dlg.Показать() ? dlg["Справочник"]?.ToString() : null;
+        const string referenceKey = "Справочник";
+        if (useNativePicker)
+        {
+            var dlg = СоздатьДиалогВвода(title);
+            dlg.Высота = 300;
+            dlg.Ширина = 560;
+            if (TryAddReferencePicker(dlg, referenceKey, references, out var pickerResult))
+            {
+                if (!dlg.Показать()) return null;
+
+                object selection = null;
+                try { selection = dlg[referenceKey]; }
+                catch { }
+                var selectedReference = ResolveSelectedReference(selection, references)
+                    ?? ResolveSelectedReference(pickerResult, references);
+                if (selectedReference != null) return selectedReference.Name;
+            }
+        }
+
+        var names = references.OrderBy(reference => reference.Name, StringComparer.CurrentCultureIgnoreCase)
+            .Select(reference => reference.Name)
+            .ToArray();
+        var fallbackDialog = СоздатьДиалогВвода(title);
+        fallbackDialog.Высота = 300;
+        fallbackDialog.Ширина = 560;
+        fallbackDialog.ДобавитьВыборИзСписка(referenceKey, names);
+        if (!fallbackDialog.Показать()) return null;
+
+        object fallbackSelection = null;
+        try { fallbackSelection = fallbackDialog[referenceKey]; }
+        catch { }
+        return ResolveSelectedReference(fallbackSelection, references)?.Name;
+    }
+
+    /// <summary>Пытается добавить штатный селектор справочника с учётом сигнатур разных версий DOCs.</summary>
+    /// <param name="dialog">Диалог DOCs, в который добавляется элемент выбора.</param>
+    /// <param name="fieldName">Имя поля выбора.</param>
+    /// <param name="candidates">Разрешённые справочники текущего шага.</param>
+    /// <param name="pickerResult">Значение, возвращённое методом добавления селектора.</param>
+    /// <returns>true, если метод селектора найден и успешно вызван.</returns>
+    private static bool TryAddReferencePicker(object dialog, string fieldName, IList<ReferenceInfo> candidates, out object pickerResult)
+    {
+        pickerResult = null;
+        if (dialog == null) return false;
+
+        var methods = dialog.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(method => method.Name == "ДобавитьВыборСправочника" && !method.IsGenericMethodDefinition);
+        foreach (var method in methods)
+        {
+            var parameters = method.GetParameters();
+            if (parameters.Length == 0 || parameters[0].ParameterType != typeof(string)) continue;
+
+            var arguments = new object[parameters.Length];
+            arguments[0] = fieldName;
+            for (int index = 1; index < parameters.Length; index++)
+            {
+                var parameter = parameters[index];
+                var parameterType = parameter.ParameterType;
+                if (parameterType.IsInstanceOfType(candidates))
+                    arguments[index] = candidates;
+                else if (parameterType.IsArray && parameterType.GetElementType().IsAssignableFrom(typeof(ReferenceInfo)))
+                    arguments[index] = candidates.ToArray();
+                else if (parameterType.IsArray && parameterType.GetElementType() == typeof(string))
+                    arguments[index] = candidates.Select(reference => reference.Name).ToArray();
+                else if (parameterType.IsAssignableFrom(typeof(string[])))
+                    arguments[index] = candidates.Select(reference => reference.Name).ToArray();
+                else if (parameter.HasDefaultValue)
+                    arguments[index] = parameter.DefaultValue;
+                else if (parameterType == typeof(bool))
+                    arguments[index] = false;
+                else if (parameterType.IsValueType)
+                    arguments[index] = Activator.CreateInstance(parameterType);
+                else
+                    arguments[index] = null;
+            }
+
+            try
+            {
+                object result = method.Invoke(dialog, arguments);
+                pickerResult = method.ReturnType == typeof(void) ? null : result;
+                return true;
+            }
+            catch
+            {
+                pickerResult = null;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Разрешает результат селектора как объект справочника, его GUID или имя.</summary>
+    /// <param name="value">Значение, полученное из диалога или из метода выбора.</param>
+    /// <param name="candidates">Допустимые справочники текущего шага.</param>
+    /// <returns>Совпавший справочник либо null, если результат не удалось однозначно сопоставить.</returns>
+    private static ReferenceInfo ResolveSelectedReference(object value, IEnumerable<ReferenceInfo> candidates)
+    {
+        if (value == null) return null;
+        if (value is ReferenceInfo referenceInfo)
+            return candidates.FirstOrDefault(reference => reference.Guid == referenceInfo.Guid);
+
+        object nestedReference = GetPropertyValue(value, "ReferenceInfo") ?? GetPropertyValue(value, "Reference");
+        if (nestedReference != null && !ReferenceEquals(nestedReference, value))
+        {
+            var nestedResult = ResolveSelectedReference(nestedReference, candidates);
+            if (nestedResult != null) return nestedResult;
+        }
+
+        Guid selectedGuid = value is Guid guid ? guid : ReadGuid(value, "Guid", "GUID", "ReferenceGuid");
+        if (selectedGuid != Guid.Empty)
+        {
+            var byGuid = candidates.FirstOrDefault(reference => reference.Guid == selectedGuid);
+            if (byGuid != null) return byGuid;
+        }
+
+        string selectedName = value is string text ? text : Convert.ToString(GetPropertyValue(value, "Name"));
+        if (Guid.TryParse(selectedName, out selectedGuid))
+        {
+            var byGuid = candidates.FirstOrDefault(reference => reference.Guid == selectedGuid);
+            if (byGuid != null) return byGuid;
+        }
+        return string.IsNullOrWhiteSpace(selectedName)
+            ? null
+            : candidates.FirstOrDefault(reference => string.Equals(reference.Name, selectedName, StringComparison.Ordinal));
+    }
+
+    /// <summary>Кэширует входящие и исходящие структурные связи всех доступных справочников.</summary>
+    /// <param name="references">Полный список загруженных справочников DOCs.</param>
+    /// <returns>Словарь GUID справочника к GUID всех непосредственно связанных справочников.</returns>
+    private static Dictionary<Guid, HashSet<Guid>> BuildReferenceLinkCache(IList<ReferenceInfo> references)
+    {
+        var cache = references.ToDictionary(reference => reference.Guid, _ => new HashSet<Guid>());
+        foreach (var source in references)
+        {
+            foreach (var link in GetLinksFromOwner(source.Description))
+            {
+                var target = link?.SlaveGroup?.ReferenceInfo;
+                if (target == null || target.Guid == source.Guid) continue;
+
+                if (cache.TryGetValue(source.Guid, out var outgoing)) outgoing.Add(target.Guid);
+                if (cache.TryGetValue(target.Guid, out var incoming)) incoming.Add(source.Guid);
+            }
+        }
+        return cache;
+    }
+
+    /// <summary>Формирует текст подтверждения с перечнем уже выбранных каталогов и типов.</summary>
+    /// <param name="catalogs">Контексты справочников, накопленные в текущем цикле.</param>
+    /// <returns>Многострочная подпись для диалога продолжения выбора.</returns>
+    private static string BuildAddMoreTypesPrompt(IEnumerable<SelectedCatalogContext> catalogs)
+    {
+        var lines = catalogs.Select(catalog =>
+            $"• Справочник \"{catalog.Reference.Name}\": {string.Join(", ", catalog.Types.Select(type => type.Имя))}");
+        return "Уже выбрано:\n" + string.Join("\n", lines) + "\n\nДобавить еще типы из справочника?";
+    }
+
+    /// <summary>Определяет сложную иерархию по enum-настройке DOCs и ищет группу подключений.</summary>
+    /// <param name="reference">Справочник, настройки которого исследуются.</param>
+    /// <returns>Объект группы подключений либо null для обычной иерархии/недоступного API.</returns>
+    private static object FindConnectionGroup(ReferenceInfo reference)
+    {
+        var description = reference?.Description;
+        if (description == null || !IsComplexHierarchy(GetPropertyValue(description, "HierarchyType")))
+            return null;
+
+        foreach (string propertyName in new[] { "ConnectionGroup", "HierarchyGroup", "ComplexHierarchyGroup" })
+        {
+            var connectionGroup = GetPropertyValue(description, propertyName);
+            if (connectionGroup != null) return connectionGroup;
+        }
+
+        try
+        {
+            return description.GetAllGroups()?.FirstOrDefault(group =>
+                group != null && (IsTrue(GetPropertyValue(group, "IsConnectionGroup")) ||
+                                  string.Equals(group.Name, "Подключение", StringComparison.CurrentCultureIgnoreCase)));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Проверяет значение enum и локализованное имя сложной иерархии.</summary>
+    /// <param name="hierarchyType">Значение настройки иерархии справочника.</param>
+    /// <returns>true, если настройка указывает на сложную иерархию.</returns>
+    private static bool IsComplexHierarchy(object hierarchyType)
+    {
+        string name = Convert.ToString(hierarchyType);
+        return string.Equals(name, "Complex", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(name, "Сложная", StringComparison.CurrentCultureIgnoreCase) ||
+               string.Equals(name, "Сложная иерархия", StringComparison.CurrentCultureIgnoreCase);
+    }
+
+    /// <summary>Определяет справочник с простой или сложной иерархией объектов.</summary>
+    /// <param name="reference">Справочник, настройки которого проверяются.</param>
+    /// <returns>true, если справочник использует дерево либо явно поддерживает иерархию.</returns>
+    private static bool IsHierarchicalCatalog(ReferenceInfo reference)
+    {
+        var description = reference?.Description;
+        if (description == null) return false;
+
+        string hierarchyName = Convert.ToString(GetPropertyValue(description, "HierarchyType"));
+        if (IsComplexHierarchy(hierarchyName) ||
+            new[] { "Simple", "Tree", "Дерево", "Простая", "Простая иерархия" }
+            .Any(name => string.Equals(name, hierarchyName, StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(name, hierarchyName, StringComparison.CurrentCultureIgnoreCase)))
+            return true;
+
+        return IsTrue(GetPropertyValue(description, "HasHierarchy"));
     }
 
     /// <summary>Показывает стандартный диалог DOCs выбора типов объектов справочника.</summary>
@@ -210,9 +448,17 @@ public class XmiSchemaExporterMacro : MacroProvider
     {
         if (reference?.Description == null) return new List<ParameterInfo>();
 
-        var parameters = reference.Description.GetAllGroups()
-            .Where(group => group != null)
+        var groups = reference.Description.GetAllGroups()?.Where(group => group != null).ToList()
+                     ?? new List<ParameterGroup>();
+        var connectionGroup = FindConnectionGroup(reference) as ParameterGroup;
+        if (connectionGroup != null && groups.All(group => group.Guid != connectionGroup.Guid))
+            groups.Add(connectionGroup);
+
+        var connectionParameters = GetEnumerableProperty(FindConnectionGroup(reference), "Parameters")
+            .OfType<ParameterInfo>();
+        var parameters = groups
             .SelectMany(group => group.Parameters ?? Enumerable.Empty<ParameterInfo>())
+            .Concat(connectionParameters)
             .Where(p => p != null && p.IsVisible)
             .GroupBy(p => p.Guid)
             .Select(group => group.First())
@@ -352,19 +598,33 @@ public class XmiSchemaExporterMacro : MacroProvider
 
         foreach (var master in catalogs)
         {
-            var links = master.Reference.Description?.GetLinks();
-            if (links == null) continue;
-
-            foreach (var link in links)
+            var owners = new[] { master.Reference.Description, master.ConnectionGroup }
+                .Where(owner => owner != null)
+                .Distinct()
+                .ToList();
+            foreach (var owner in owners)
             {
-                var slaveReference = link?.SlaveGroup?.ReferenceInfo;
-                if (slaveReference == null || !selectedReferenceGuids.Contains(slaveReference.Guid) || slaveReference.Guid == master.Reference.Guid)
-                    continue;
+                bool isConnectionRelation = master.ConnectionGroup != null && ReferenceEquals(owner, master.ConnectionGroup);
+                foreach (var link in GetLinksFromOwner(owner))
+                {
+                    var slaveReference = link?.SlaveGroup?.ReferenceInfo;
+                    if (slaveReference == null || !selectedReferenceGuids.Contains(slaveReference.Guid) || slaveReference.Guid == master.Reference.Guid)
+                        continue;
 
-                var slave = catalogs.FirstOrDefault(item => item.Reference.Guid == slaveReference.Guid);
-                if (slave == null) continue;
+                    var slave = catalogs.FirstOrDefault(item => item.Reference.Guid == slaveReference.Guid);
+                    if (slave == null) continue;
 
-                candidates.Add(new SelectedRelation { Link = link, Master = master, Slave = slave });
+                    bool duplicate = candidates.Any(candidate => candidate.Master.Reference.Guid == master.Reference.Guid &&
+                        candidate.Slave.Reference.Guid == slave.Reference.Guid && candidate.Link.Guid == link.Guid);
+                    if (!duplicate)
+                        candidates.Add(new SelectedRelation
+                        {
+                            Link = link,
+                            Master = master,
+                            Slave = slave,
+                            IsConnectionRelation = isConnectionRelation
+                        });
+                }
             }
         }
 
@@ -430,7 +690,7 @@ public class XmiSchemaExporterMacro : MacroProvider
         var catalogs = selectedCatalogs.Select(context => catalogByReferenceGuid[context.Reference.Guid]).ToList();
         var classesByReferenceGuid = selectedCatalogs.ToDictionary(
             context => context.Reference.Guid,
-            context => BuildClasses(context.Types, context.Parameters, context.Reference, catalogByReferenceGuid[context.Reference.Guid].Guid));
+            context => BuildClasses(context, catalogByReferenceGuid[context.Reference.Guid].Guid));
         var allClasses = classesByReferenceGuid.Values.SelectMany(classes => classes).ToList();
         var catalogTypeAssocs = allClasses.Select(cls =>
         {
@@ -449,8 +709,17 @@ public class XmiSchemaExporterMacro : MacroProvider
 
         foreach (var link in links)
         {
-            var masterClasses = classesByReferenceGuid[link.Master.Reference.Guid];
-            var slaveClasses = classesByReferenceGuid[link.Slave.Reference.Guid];
+            if (link?.Link == null || link.Master?.Reference == null || link.Slave?.Reference == null)
+                continue;
+            var masterClasses = classesByReferenceGuid[link.Master.Reference.Guid]
+                .Where(classModel => link.IsConnectionRelation
+                    ? classModel.IsConnection
+                    : !classModel.IsConnection && SupportsParameterGroup(classModel, link.Link.Guid))
+                .ToList();
+            var slaveGroupGuid = link.Link.SlaveGroup?.Guid ?? Guid.Empty;
+            var slaveClasses = classesByReferenceGuid[link.Slave.Reference.Guid]
+                .Where(classModel => !classModel.IsConnection && slaveGroupGuid != Guid.Empty && SupportsParameterGroup(classModel, slaveGroupGuid))
+                .ToList();
             foreach (var masterClass in masterClasses)
             {
                 foreach (var slaveClass in slaveClasses)
@@ -471,6 +740,9 @@ public class XmiSchemaExporterMacro : MacroProvider
                 }
             }
         }
+
+        AddComplexHierarchyAssociations(selectedCatalogs, classesByReferenceGuid, allAssocs);
+        AddIntraCatalogHierarchyAssociations(selectedCatalogs, classesByReferenceGuid, allAssocs);
 
         string packageGuid = "EAPK_" + System.Guid.NewGuid().ToString("N").ToUpper();
         var pkg = new XElement("packagedElement",
@@ -592,7 +864,7 @@ public class XmiSchemaExporterMacro : MacroProvider
         return new XElement("packagedElement",
             new XAttribute(xmi + "type", "uml:Association"),
             new XAttribute(xmi + "id", association.Guid),
-            new XAttribute("name", ""),
+            new XAttribute("name", "Содержит"),
             new XAttribute("visibility", "public"),
             new XElement("memberEnd", new XAttribute(xmi + "idref", catalogEndId)),
             new XElement("memberEnd", new XAttribute(xmi + "idref", typeEndId)),
@@ -776,6 +1048,37 @@ public class XmiSchemaExporterMacro : MacroProvider
             if (item != null) yield return item;
     }
 
+    /// <summary>Получает link groups владельца через свойство Links или метод GetLinks без обязательной сигнатуры.</summary>
+    /// <param name="owner">Группа или описание справочника DOCs.</param>
+    /// <returns>Найденные link groups; при недоступности API возвращается пустая последовательность.</returns>
+    private static IEnumerable<ParameterGroup> GetLinksFromOwner(object owner)
+    {
+        if (owner == null) yield break;
+
+        foreach (var link in GetEnumerableProperty(owner, "Links").OfType<ParameterGroup>())
+            yield return link;
+
+        object methodResult = null;
+        bool methodFailed = false;
+        try
+        {
+            var method = owner.GetType().GetMethod("GetLinks", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+            methodResult = method?.Invoke(owner, null);
+        }
+        catch
+        {
+            methodFailed = true;
+        }
+        if (methodFailed) yield break;
+
+        if (methodResult is System.Collections.IEnumerable links)
+        {
+            foreach (var link in links)
+                if (link is ParameterGroup parameterGroup)
+                    yield return parameterGroup;
+        }
+    }
+
     /// <summary>Безопасно читает публичное свойство API через reflection.</summary>
     /// <param name="source">Исходный объект API.</param>
     /// <param name="propertyName">Имя свойства.</param>
@@ -859,7 +1162,7 @@ public class XmiSchemaExporterMacro : MacroProvider
     /// <param name="packageGuid">XMI ID корневого UML-пакета.</param>
     /// <param name="catalogs">Экспортируемые справочники.</param>
     /// <param name="classes">Экспортируемые типы и их параметры.</param>
-    /// <param name="assocs">Связи между классами разных каталогов.</param>
+    /// <param name="assocs">Направленные связи между классами выбранных справочников.</param>
     /// <param name="catalogTypeAssocs">Связи типов с их справочниками.</param>
     /// <returns>Extension-узел Enterprise Architect для файла XMI.</returns>
     private XElement BuildEaExtension(string packageGuid, List<CatalogModel> catalogs, List<ClassModel> classes,
@@ -955,22 +1258,31 @@ public class XmiSchemaExporterMacro : MacroProvider
             elems.Add(el);
         }
 
-        foreach (var eventModel in catalogs.SelectMany(catalog => catalog.Events))
+        foreach (var catalog in catalogs)
         {
-            var properties = new XElement("properties",
-                new XAttribute("isSpecification", "false"),
-                new XAttribute("sType", "Signal"),
-                new XAttribute("nType", "0"),
-                new XAttribute("scope", "public"),
-                new XAttribute("stereotype", "event"));
-            if (!string.IsNullOrWhiteSpace(eventModel.Comment))
-                properties.Add(new XAttribute("documentation", eventModel.Comment));
-            var element = new XElement("element",
-                new XAttribute(xmi + "idref", eventModel.Guid),
-                new XAttribute(xmi + "type", "uml:Signal"),
-                new XAttribute("name", eventModel.Name),
-                properties);
-            elems.Add(element);
+            foreach (var eventModel in catalog.Events)
+            {
+                var properties = new XElement("properties",
+                    new XAttribute("isSpecification", "false"),
+                    new XAttribute("sType", "Signal"),
+                    new XAttribute("nType", "0"),
+                    new XAttribute("scope", "public"),
+                    new XAttribute("stereotype", "event"));
+                if (!string.IsNullOrWhiteSpace(eventModel.Comment))
+                    properties.Add(new XAttribute("documentation", eventModel.Comment));
+                var element = new XElement("element",
+                    new XAttribute(xmi + "idref", eventModel.Guid),
+                    new XAttribute(xmi + "type", "uml:Signal"),
+                    new XAttribute("name", eventModel.Name),
+                    properties,
+                    new XElement("model",
+                        new XAttribute("package", packageGuid),
+                        new XAttribute("owner", catalog.Guid),
+                        new XAttribute("tpos", localId),
+                        new XAttribute("ea_localid", localId++),
+                        new XAttribute("ea_eleType", "element")));
+                elems.Add(element);
+            }
         }
         ext.Add(elems);
 
@@ -978,6 +1290,7 @@ public class XmiSchemaExporterMacro : MacroProvider
         foreach (var a in assocs)
         {
             connectors.Add(new XElement("connector", new XAttribute(xmi + "idref", a.AssocGuid),
+                new XAttribute("name", a.Name ?? string.Empty),
                 new XElement("source", new XAttribute(xmi + "idref", a.SourceClassGuid)),
                 new XElement("target", new XAttribute(xmi + "idref", a.TargetClassGuid)),
                 new XElement("properties", new XAttribute("ea_type", "Association"))
@@ -987,6 +1300,7 @@ public class XmiSchemaExporterMacro : MacroProvider
         {
             connectors.Add(new XElement("connector",
                 new XAttribute(xmi + "idref", association.Guid),
+                new XAttribute("name", "Содержит"),
                 new XElement("source", new XAttribute(xmi + "idref", association.CatalogGuid)),
                 new XElement("target", new XAttribute(xmi + "idref", association.TypeGuid)),
                 new XElement("properties", new XAttribute("ea_type", "Association"))));
@@ -1135,33 +1449,327 @@ public class XmiSchemaExporterMacro : MacroProvider
                 new XAttribute("memberEnd", extensionEndId + " " + baseEndId))));
     }
 
-    /// <summary>Строит UML-классы из типов DOCs и выбранных параметров каталога.</summary>
-    /// <param name="types">Выбранные типы объектов.</param>
-    /// <param name="parameters">Выбранные параметры, включаемые в каждый тип.</param>
-    /// <param name="reference">Источник имен, комментариев и классов DOCs.</param>
-    /// <param name="catalogGuid">ID UML Component-владельца типов.</param>
-    /// <returns>Промежуточные модели классов для сериализации.</returns>
-    private List<ClassModel> BuildClasses(ТипОбъекта[] types, List<ParameterInfo> parameters, ReferenceInfo reference, string catalogGuid)
+    /// <summary>Создаёт модели выбранных типов и, для сложной иерархии, псевдотип подключения.</summary>
+    /// <param name="context">Выбранный каталог, его типы и выбранные параметры.</param>
+    /// <param name="catalogGuid">XMI ID UML-компонента справочника.</param>
+    /// <returns>Типы с параметрами, подтверждённо принадлежащими каждому типу.</returns>
+    private List<ClassModel> BuildClasses(SelectedCatalogContext context, string catalogGuid)
     {
         var list = new List<ClassModel>();
+        var reference = context?.Reference;
+        if (reference == null) return list;
+
         var sourceClasses = reference.Classes?.AllClasses?.Cast<object>().ToList() ?? new List<object>();
-        foreach (var t in types)
+        foreach (var type in context.Types ?? new ТипОбъекта[0])
         {
-            var sourceClass = sourceClasses.FirstOrDefault(item => string.Equals(Convert.ToString(GetPropertyValue(item, "Name")), t.Имя, StringComparison.Ordinal));
+            var sourceClass = sourceClasses.FirstOrDefault(item =>
+                string.Equals(Convert.ToString(GetPropertyValue(item, "Name")), type.Имя, StringComparison.Ordinal));
             var cls = new ClassModel
             {
-                Name = t.Имя,
+                Name = type.Имя,
                 CatalogGuid = catalogGuid,
                 SourceClass = sourceClass,
+                SourceType = type,
                 Comment = Convert.ToString(GetPropertyValue(sourceClass, "Comment"))
             };
-            foreach (var p in parameters)
+            foreach (var parameter in context.Parameters.Where(parameter => IsParameterAttachedToType(parameter, type, sourceClass)))
             {
-                var (typeRef, eaType) = MapType(p.Type);
-                cls.Parameters.Add(new ParamModel { Name = p.Name, TypeRef = typeRef, EaType = eaType });
+                var (typeRef, eaType) = MapType(parameter.Type);
+                cls.Parameters.Add(new ParamModel { Name = parameter.Name, TypeRef = typeRef, EaType = eaType });
             }
             list.Add(cls);
         }
+
+        if (IsComplexHierarchy(GetPropertyValue(reference.Description, "HierarchyType")))
+        {
+            var connectionGroup = context.ConnectionGroup ?? FindConnectionGroup(reference);
+            var connection = new ClassModel
+            {
+                Name = "Подключение",
+                CatalogGuid = catalogGuid,
+                SourceClass = connectionGroup,
+                SourceType = connectionGroup,
+                IsConnection = true,
+                Comment = GetObjectComment(connectionGroup)
+            };
+
+            foreach (var parameter in context.Parameters.Where(parameter => IsParameterAttachedToType(parameter, connectionGroup, connectionGroup)))
+            {
+                var (typeRef, eaType) = MapType(parameter.Type);
+                connection.Parameters.Add(new ParamModel { Name = parameter.Name, TypeRef = typeRef, EaType = eaType });
+            }
+            list.Add(connection);
+        }
+
         return list;
+    }
+
+    /// <summary>Проверяет принадлежность выбранного параметра конкретному типу, не размножая поля каталога.</summary>
+    /// <param name="parameter">Параметр, выбранный пользователем.</param>
+    /// <param name="sourceType">Wrapper-тип DOCs или группа подключения.</param>
+    /// <param name="sourceClass">Модельный ClassObject типа или группы.</param>
+    /// <returns>true только при подтверждённом совпадении GUID параметра или его группы.</returns>
+    private static bool IsParameterAttachedToType(ParameterInfo parameter, object sourceType, object sourceClass)
+    {
+        if (parameter == null) return false;
+
+        foreach (var owner in new[] { sourceType, sourceClass }.Where(owner => owner != null))
+        {
+            foreach (string propertyName in new[] { "Parameters", "Параметры", "ParameterList" })
+            {
+                var values = GetEnumerableProperty(owner, propertyName).ToList();
+                if (values.Count == 0) continue;
+                if (values.Any(value => ReadGuid(value, "Guid", "ParameterGuid", "GUID") == parameter.Guid))
+                    return true;
+            }
+        }
+
+        var parameterGroupGuid = parameter.Group?.Guid ?? Guid.Empty;
+        if (parameterGroupGuid == Guid.Empty) return false;
+
+        var typeGroupGuids = GetTypeParameterGroupGuids(sourceType, sourceClass);
+        return typeGroupGuids.Contains(parameterGroupGuid);
+    }
+
+    /// <summary>Собирает группы параметров типа и его базовых классов, используя совместимые имена API.</summary>
+    /// <param name="sourceType">Объект типа DOCs.</param>
+    /// <param name="sourceClass">Объект ClassObject, если он найден.</param>
+    /// <returns>GUID групп, явно назначенных типу или его предкам.</returns>
+    private static HashSet<Guid> GetTypeParameterGroupGuids(object sourceType, object sourceClass)
+    {
+        var result = new HashSet<Guid>();
+        var visited = new HashSet<object>();
+        var pending = new Queue<object>();
+        if (sourceType != null) pending.Enqueue(sourceType);
+        if (sourceClass != null) pending.Enqueue(sourceClass);
+
+        while (pending.Count > 0)
+        {
+            var current = pending.Dequeue();
+            if (current == null || !visited.Add(current)) continue;
+
+            foreach (string propertyName in new[] { "ParameterGroups", "ГруппыПараметров", "Groups", "Группы" })
+            {
+                foreach (var group in GetEnumerableProperty(current, propertyName))
+                {
+                    Guid groupGuid = ReadGuid(group, "Guid", "GroupGuid", "GUID");
+                    if (groupGuid != Guid.Empty) result.Add(groupGuid);
+                }
+            }
+
+            foreach (string baseProperty in new[] { "Base", "BaseClass", "БазовыйТип" })
+            {
+                var baseClass = GetPropertyValue(current, baseProperty);
+                if (baseClass != null) pending.Enqueue(baseClass);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>Проверяет наличие связи или группы slave в наборах параметров конкретного типа.</summary>
+    /// <param name="classModel">Экспортируемый класс типа.</param>
+    /// <param name="groupGuid">GUID link group на master-стороне либо slave group на целевой стороне.</param>
+    /// <returns>true только если группа объявлена у типа или унаследованного базового типа.</returns>
+    private static bool SupportsParameterGroup(ClassModel classModel, Guid groupGuid)
+    {
+        if (classModel == null || classModel.IsConnection || groupGuid == Guid.Empty) return false;
+        return GetTypeParameterGroupGuids(classModel.SourceType, classModel.SourceClass).Contains(groupGuid);
+    }
+
+    /// <summary>Создаёт физические связи сложной иерархии через псевдокласс «Подключение».</summary>
+    /// <param name="selectedCatalogs">Выбранные справочники и их типы объектов.</param>
+    /// <param name="classesByReferenceGuid">UML-классы, сгруппированные по GUID справочника.</param>
+    /// <param name="allAssocs">Общий список ассоциаций для UML и EA Extension.</param>
+    private static void AddComplexHierarchyAssociations(
+        IEnumerable<SelectedCatalogContext> selectedCatalogs,
+        IDictionary<Guid, List<ClassModel>> classesByReferenceGuid,
+        List<AssocModel> allAssocs)
+    {
+        if (selectedCatalogs == null || classesByReferenceGuid == null || allAssocs == null) return;
+
+        foreach (var context in selectedCatalogs.Where(item => item?.Reference != null))
+        {
+            if (!classesByReferenceGuid.TryGetValue(context.Reference.Guid, out var catalogClasses) || catalogClasses == null)
+                continue;
+
+            var connectionClass = catalogClasses.FirstOrDefault(classModel => classModel?.IsConnection == true);
+            bool isComplexHierarchy = IsComplexHierarchy(GetPropertyValue(context.Reference.Description, "HierarchyType"));
+            if (connectionClass == null || (!isComplexHierarchy && !catalogClasses.Any(classModel => classModel?.IsConnection == true)))
+                continue;
+
+            foreach (var objectClass in catalogClasses.Where(classModel => classModel != null && !classModel.IsConnection))
+            {
+                AddConnectionAssociation(connectionClass, objectClass, "Родительский объект", allAssocs);
+                AddConnectionAssociation(connectionClass, objectClass, "Дочерний объект", allAssocs);
+            }
+        }
+    }
+
+    /// <summary>Добавляет одну физическую ассоциацию от подключения к объектному типу.</summary>
+    /// <param name="connectionClass">Псевдокласс «Подключение» — источник ассоциации.</param>
+    /// <param name="objectClass">Объектный класс — цель ассоциации.</param>
+    /// <param name="associationName">Имя роли «Родительский объект» или «Дочерний объект».</param>
+    /// <param name="allAssocs">Общий список ассоциаций для UML и EA Extension.</param>
+    private static void AddConnectionAssociation(
+        ClassModel connectionClass,
+        ClassModel objectClass,
+        string associationName,
+        List<AssocModel> allAssocs)
+    {
+        if (connectionClass == null || objectClass == null || allAssocs == null) return;
+        if (connectionClass.Associations.Any(association =>
+                association != null && association.Name == associationName && association.TargetClassGuid == objectClass.Guid))
+            return;
+
+        var association = new AssocModel
+        {
+            Name = associationName,
+            SourceClassGuid = connectionClass.Guid,
+            SourceClassName = connectionClass.Name,
+            TargetClassGuid = objectClass.Guid,
+            TargetClassName = objectClass.Name,
+            SourceLower = "0",
+            SourceUpper = "*",
+            TargetLower = "1",
+            TargetUpper = "1"
+        };
+        connectionClass.Associations.Add(association);
+        allAssocs.Add(association);
+    }
+
+    /// <summary>Добавляет ассоциации «Состоит из» по допустимым дочерним классам дерева.</summary>
+    /// <param name="selectedCatalogs">Выбранные справочники и их типы объектов.</param>
+    /// <param name="classesByReferenceGuid">UML-классы, сгруппированные по GUID справочника.</param>
+    /// <param name="allAssocs">Общий список ассоциаций для UML и EA Extension.</param>
+    private static void AddIntraCatalogHierarchyAssociations(
+        IEnumerable<SelectedCatalogContext> selectedCatalogs,
+        IDictionary<Guid, List<ClassModel>> classesByReferenceGuid,
+        List<AssocModel> allAssocs)
+    {
+        if (selectedCatalogs == null || classesByReferenceGuid == null || allAssocs == null) return;
+
+        foreach (var context in selectedCatalogs.Where(item => item?.Reference != null && IsHierarchicalCatalog(item.Reference)))
+        {
+            if (!classesByReferenceGuid.TryGetValue(context.Reference.Guid, out var catalogClasses)) continue;
+            if (catalogClasses == null) continue;
+
+            foreach (var parentClass in catalogClasses.Where(classModel => classModel != null))
+            {
+                foreach (var childObjectClass in GetChildClasses(parentClass))
+                {
+                    var childClass = ResolveSelectedChildClass(childObjectClass, catalogClasses);
+                    if (childClass == null || childClass.Guid == parentClass.Guid) continue;
+                    if (parentClass.Associations.Any(association =>
+                            association != null && association.Name == "Состоит из" && association.TargetClassGuid == childClass.Guid)) continue;
+
+                    var association = new AssocModel
+                    {
+                        Name = "Состоит из",
+                        SourceClassGuid = parentClass.Guid,
+                        SourceClassName = parentClass.Name,
+                        TargetClassGuid = childClass.Guid,
+                        TargetClassName = childClass.Name,
+                        SourceLower = "0",
+                        SourceUpper = "1",
+                        TargetLower = "0",
+                        TargetUpper = "*"
+                    };
+                    parentClass.Associations.Add(association);
+                    allAssocs.Add(association);
+                }
+            }
+        }
+    }
+
+    /// <summary>Получает дочерние типы через свойство ChildObjectClasses исходного класса или wrapper-типа.</summary>
+    /// <param name="parentClass">Класс-родитель, дочерние типы которого требуется прочитать.</param>
+    /// <returns>Объекты дочерних классов; при недоступности API возвращается пустой список.</returns>
+    private static IEnumerable<object> GetChildClasses(ClassModel parentClass)
+    {
+        if (parentClass == null) return Enumerable.Empty<object>();
+
+        var sourceClass = parentClass.SourceClass;
+        var sourceType = parentClass.SourceType;
+        if (TryGetChildClassesFromOwner(sourceClass, out var childClasses))
+            return childClasses;
+        if (!ReferenceEquals(sourceType, sourceClass) && TryGetChildClassesFromOwner(sourceType, out childClasses))
+            return childClasses;
+        return Enumerable.Empty<object>();
+    }
+
+    /// <summary>Безопасно читает коллекцию ChildObjectClasses через публичное свойство экземпляра.</summary>
+    /// <param name="owner">Объект ClassObject или wrapper-класса.</param>
+    /// <param name="childClasses">Полученные элементы коллекции.</param>
+    /// <returns>true, если свойство найдено и его значение удалось перечислить.</returns>
+    private static bool TryGetChildClassesFromOwner(object owner, out IEnumerable<object> childClasses)
+    {
+        childClasses = Enumerable.Empty<object>();
+        if (owner == null) return false;
+
+        try
+        {
+            var property = owner.GetType().GetProperty("ChildObjectClasses", BindingFlags.Public | BindingFlags.Instance);
+            if (property == null) return false;
+
+            var value = property.GetValue(owner, null) as System.Collections.IEnumerable;
+            if (value == null) return false;
+
+            var result = new List<object>();
+            foreach (var childClass in value)
+                if (childClass != null) result.Add(childClass);
+            childClasses = result;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Находит выбранный UML-класс по GUID или имени объекта ChildObjectClasses.</summary>
+    /// <param name="childObjectClass">Дочерний ClassObject из модели DOCs.</param>
+    /// <param name="catalogClasses">Типы и псевдоклассы текущего справочника.</param>
+    /// <returns>Совпавший выбранный класс либо null.</returns>
+    private static ClassModel ResolveSelectedChildClass(object childObjectClass, IEnumerable<ClassModel> catalogClasses)
+    {
+        if (childObjectClass == null || catalogClasses == null) return null;
+
+        Guid childGuid = ReadGuid(childObjectClass, "Guid", "GUID", "ClassGuid");
+        if (childGuid != Guid.Empty)
+        {
+            var classByGuid = catalogClasses.FirstOrDefault(classModel =>
+                classModel != null &&
+                (ReadGuid(classModel.SourceClass, "Guid", "GUID", "ClassGuid") == childGuid ||
+                 ReadGuid(classModel.SourceType, "Guid", "GUID", "ClassGuid") == childGuid));
+            if (classByGuid != null) return classByGuid;
+        }
+
+        string childName = Convert.ToString(GetPropertyValue(childObjectClass, "Name") ??
+                                            GetPropertyValue(childObjectClass, "Имя"));
+        if (string.IsNullOrWhiteSpace(childName)) return null;
+
+        return catalogClasses.FirstOrDefault(classModel =>
+            classModel != null &&
+            (string.Equals(Convert.ToString(GetPropertyValue(classModel.SourceClass, "Name")), childName, StringComparison.Ordinal) ||
+             string.Equals(Convert.ToString(GetPropertyValue(classModel.SourceClass, "Имя")), childName, StringComparison.Ordinal) ||
+             string.Equals(Convert.ToString(GetPropertyValue(classModel.SourceType, "Name")), childName, StringComparison.Ordinal) ||
+             string.Equals(Convert.ToString(GetPropertyValue(classModel.SourceType, "Имя")), childName, StringComparison.Ordinal) ||
+             string.Equals(classModel.Name, childName, StringComparison.Ordinal)));
+    }
+
+    /// <summary>Читает GUID из одного из известных имен свойств DOCs, возвращая Empty при неизвестном формате.</summary>
+    /// <param name="source">Объект API или wrapper с идентификатором.</param>
+    /// <param name="propertyNames">Допустимые названия идентификатора в версиях API.</param>
+    /// <returns>Найденный GUID либо Guid.Empty.</returns>
+    private static Guid ReadGuid(object source, params string[] propertyNames)
+    {
+        foreach (string propertyName in propertyNames)
+        {
+            object value = GetPropertyValue(source, propertyName);
+            if (value is Guid guid) return guid;
+            if (Guid.TryParse(Convert.ToString(value), out guid)) return guid;
+        }
+        return Guid.Empty;
     }
 }
