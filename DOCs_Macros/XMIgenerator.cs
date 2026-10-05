@@ -69,7 +69,7 @@ public class XmiSchemaExporterMacro : MacroProvider
     /// <summary>Промежуточная UML-модель типа DOCs и его атрибутов/ассоциаций.</summary>
     private class ClassModel
     {
-        public string Guid { get; set; } = "EAID_" + System.Guid.NewGuid().ToString("N").ToUpper();
+        public string Guid { get; set; }
         public string Name { get; set; }
         public string Comment { get; set; }
         public string CatalogGuid { get; set; }
@@ -85,7 +85,7 @@ public class XmiSchemaExporterMacro : MacroProvider
     /// <summary>Промежуточная UML-модель справочника, его настроек и событий.</summary>
     private class CatalogModel
     {
-        public string Guid { get; set; } = "EAID_" + System.Guid.NewGuid().ToString("N").ToUpper();
+        public string Guid { get; set; }
         public string Name { get; set; }
         public string Comment { get; set; }
         public List<KeyValuePair<string, string>> Settings { get; set; } = new List<KeyValuePair<string, string>>();
@@ -95,7 +95,7 @@ public class XmiSchemaExporterMacro : MacroProvider
     /// <summary>Промежуточное представление пользовательского или системного события DOCs.</summary>
     private class EventModel
     {
-        public string Guid { get; set; } = "EAID_" + System.Guid.NewGuid().ToString("N").ToUpper();
+        public string Guid { get; set; }
         public string Name { get; set; }
         public string Comment { get; set; }
         public string CatalogGuid { get; set; }
@@ -104,35 +104,39 @@ public class XmiSchemaExporterMacro : MacroProvider
     /// <summary>Промежуточное представление параметра DOCs как UML Property.</summary>
     private class ParamModel
     {
-        public string Guid { get; set; } = "EAID_" + System.Guid.NewGuid().ToString("N").ToUpper();
+        public string Guid { get; set; }
         public string Name { get; set; }
         public string TypeRef { get; set; }
         public string EaType { get; set; }
     }
 
-    /// <summary>Промежуточное представление направленной связи между классами.</summary>
+    /// <summary>Промежуточное представление ассоциации между классами и ролей её концов.</summary>
     private class AssocModel
     {
-        public string AssocGuid { get; set; } = "EAID_" + System.Guid.NewGuid().ToString("N").ToUpper();
-        public string SrcPropGuid { get; set; } = "EAID_src_" + System.Guid.NewGuid().ToString("N").ToUpper();
-        public string DstPropGuid { get; set; } = "EAID_dst_" + System.Guid.NewGuid().ToString("N").ToUpper();
+        public string AssocGuid { get; set; }
+        public string SrcPropGuid { get; set; }
+        public string DstPropGuid { get; set; }
         public string Name { get; set; }
         public string SourceClassGuid { get; set; }
         public string SourceClassName { get; set; }
         public string TargetClassGuid { get; set; }
         public string TargetClassName { get; set; }
-        public string SourceLower { get; set; } = "1";
-        public string SourceUpper { get; set; } = "1";
-        public string TargetLower { get; set; } = "1";
-        public string TargetUpper { get; set; } = "1";
-        /// <summary>Направление ассоциации для отображения Enterprise Architect.</summary>
-        public string Direction { get; set; }
+        /// <summary>Роль на конце источника, например имя связи со стороны Master.</summary>
+        public string SourceRole { get; set; }
+        /// <summary>Роль на конце приёмника, например имя связи со стороны Slave.</summary>
+        public string TargetRole { get; set; }
+        public string SourceLower { get; set; } = "0";
+        public string SourceUpper { get; set; } = "-1";
+        public string TargetLower { get; set; } = "0";
+        public string TargetUpper { get; set; } = "-1";
+        /// <summary>Направление ассоциации; по умолчанию стрелка не задаётся.</summary>
+        public string Direction { get; set; } = "Unspecified";
     }
 
     /// <summary>Ассоциация EA, связывающая компонент справочника с UML-классом его типа.</summary>
     private class CatalogTypeAssocModel
     {
-        public string Guid { get; set; } = CreateEaId();
+        public string Guid { get; set; }
         public string CatalogGuid { get; set; }
         public string TypeGuid { get; set; }
         public string CatalogName { get; set; }
@@ -782,6 +786,7 @@ public class XmiSchemaExporterMacro : MacroProvider
             var catalog = catalogs.First(item => item.Guid == cls.CatalogGuid);
             return new CatalogTypeAssocModel
             {
+                Guid = FormatEaId(CreateDeterministicGuid($"Contains_{catalog.Guid}_{cls.Guid}")),
                 CatalogGuid = catalog.Guid,
                 CatalogName = catalog.Name,
                 TypeGuid = cls.Guid,
@@ -814,11 +819,23 @@ public class XmiSchemaExporterMacro : MacroProvider
                 foreach (var slaveClass in slaveClasses)
                 {
                     var multiplicity = GetAssociationMultiplicity(link.Link);
+                    string sourceRole = link.Link.Name;
+                    string targetRole = GetRelationNameForCatalog(link.Slave, link.Link.Guid);
+                    Guid assocRawGuid = CreateDeterministicGuid(
+                        $"Assoc_{link.Link.Guid}_{masterClass.Guid}_{slaveClass.Guid}");
                     var assoc = new AssocModel
                     {
-                        Name = link.Link.Name,
+                        AssocGuid = FormatEaId(assocRawGuid),
+                        SrcPropGuid = FormatEaId(assocRawGuid, "EAID_src_"),
+                        DstPropGuid = FormatEaId(assocRawGuid, "EAID_dst_"),
+                        // Если обе роли заданы, подписи концов полностью описывают связь.
+                        Name = !string.IsNullOrWhiteSpace(sourceRole) && !string.IsNullOrWhiteSpace(targetRole)
+                            ? null
+                            : link.Link.Name,
                         SourceClassGuid = masterClass.Guid, SourceClassName = masterClass.Name,
                         TargetClassGuid = slaveClass.Guid, TargetClassName = slaveClass.Name,
+                        SourceRole = sourceRole,
+                        TargetRole = targetRole,
                         SourceLower = multiplicity.sourceLower,
                         SourceUpper = multiplicity.sourceUpper,
                         TargetLower = multiplicity.targetLower,
@@ -833,11 +850,17 @@ public class XmiSchemaExporterMacro : MacroProvider
         AddComplexHierarchyAssociations(selectedCatalogs, classesByReferenceGuid, allAssocs);
         AddIntraCatalogHierarchyAssociations(selectedCatalogs, classesByReferenceGuid, allAssocs);
 
-        string packageGuid = "EAPK_" + System.Guid.NewGuid().ToString("N").ToUpper();
+        string combinedKeys = string.Join("_", selectedCatalogs
+            .OrderBy(context => context.Reference.Guid)
+            .Select(context => context.Reference.Guid));
+        string packageGuid = FormatEaId(
+            CreateDeterministicGuid("ModelPackage_" + combinedKeys),
+            prefix: "EAPK_");
+        string exportTimestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         var pkg = new XElement("packagedElement",
             new XAttribute(xmi + "type", "uml:Package"),
             new XAttribute(xmi + "id", packageGuid),
-            new XAttribute("name", $"Модель: {string.Join(", ", catalogs.Select(catalog => catalog.Name))}"),
+            new XAttribute("name", $"Справочники T-FLEX DOCs {exportTimestamp}"),
             new XAttribute("visibility", "public")
         );
 
@@ -864,9 +887,6 @@ public class XmiSchemaExporterMacro : MacroProvider
                 foreach (var p in cls.Parameters)
                     clsElem.Add(CreateProperty(p.Guid, p.Name, p.TypeRef));
 
-                foreach (var a in cls.Associations)
-                    clsElem.Add(CreateAssocProperty(a.DstPropGuid, a.AssocGuid, a.TargetClassGuid, a.TargetLower, a.TargetUpper));
-
                 catalogElem.Add(clsElem);
             }
 
@@ -885,11 +905,12 @@ public class XmiSchemaExporterMacro : MacroProvider
             pkg.Add(new XElement("packagedElement",
                 new XAttribute(xmi + "type", "uml:Association"),
                 new XAttribute(xmi + "id", a.AssocGuid),
-                new XAttribute("name", a.Name),
+                string.IsNullOrEmpty(a.Name) ? null : new XAttribute("name", a.Name),
                 new XAttribute("visibility", "public"),
                 new XElement("memberEnd", new XAttribute(xmi + "idref", a.DstPropGuid)),
                 new XElement("memberEnd", new XAttribute(xmi + "idref", a.SrcPropGuid)),
-                CreateOwnedEnd(a.SrcPropGuid, a.AssocGuid, a.SourceClassGuid, a.SourceLower, a.SourceUpper)
+                CreateOwnedEnd(a.DstPropGuid, a.AssocGuid, a.TargetClassGuid, a.TargetRole, a.TargetLower, a.TargetUpper),
+                CreateOwnedEnd(a.SrcPropGuid, a.AssocGuid, a.SourceClassGuid, a.SourceRole, a.SourceLower, a.SourceUpper)
             ));
         }
 
@@ -948,8 +969,10 @@ public class XmiSchemaExporterMacro : MacroProvider
     /// <returns>Пакетированный UML-элемент ассоциации.</returns>
     private XElement CreateCatalogTypeAssociation(CatalogTypeAssocModel association)
     {
-        string catalogEndId = CreateEaId();
-        string typeEndId = CreateEaId();
+        Guid containsGuid = CreateDeterministicGuid($"Contains_{association.CatalogGuid}_{association.TypeGuid}");
+        association.Guid = FormatEaId(containsGuid);
+        string catalogEndId = FormatEaId(containsGuid, "EAID_src_");
+        string typeEndId = FormatEaId(containsGuid, "EAID_dst_");
         return new XElement("packagedElement",
             new XAttribute(xmi + "type", "uml:Association"),
             new XAttribute(xmi + "id", association.Guid),
@@ -976,6 +999,9 @@ public class XmiSchemaExporterMacro : MacroProvider
     {
         var catalog = new CatalogModel
         {
+            Guid = FormatEaId(reference.Guid != Guid.Empty
+                ? reference.Guid
+                : CreateDeterministicGuid($"Catalog_{reference.Name}")),
             Name = reference.Name,
             Comment = reference.Description?.Comment
         };
@@ -1120,7 +1146,16 @@ public class XmiSchemaExporterMacro : MacroProvider
                 string comment = Convert.ToString(GetPropertyValue(eventObject, "Comment"))
                     ?? Convert.ToString(GetPropertyValue(eventObject, "Description"))
                     ?? Convert.ToString(GetPropertyValue(button, "Hint"));
-                events.Add(new EventModel { Name = name, Comment = comment, CatalogGuid = catalog.Guid });
+                Guid eventGuid = ReadGuid(eventObject, "Guid", "GUID", "EventGuid");
+                events.Add(new EventModel
+                {
+                    Guid = FormatEaId(eventGuid != Guid.Empty
+                        ? eventGuid
+                        : CreateDeterministicGuid($"Event_{catalog.Guid}_{name}")),
+                    Name = name,
+                    Comment = comment,
+                    CatalogGuid = catalog.Guid
+                });
             }
         }
     }
@@ -1179,6 +1214,26 @@ public class XmiSchemaExporterMacro : MacroProvider
         return GetPropertyValue(slaveGroup, "ReferenceInfo") as ReferenceInfo;
     }
 
+    /// <summary>Получает имя той же связи в контексте второго справочника.</summary>
+    /// <param name="catalog">Справочник, у которого запрашивается имя роли.</param>
+    /// <param name="linkGuid">GUID связи, найденной со стороны первого справочника.</param>
+    /// <returns>Контекстное имя из link.Name либо пустая строка, если связь не найдена.</returns>
+    private static string GetRelationNameForCatalog(SelectedCatalogContext catalog, Guid linkGuid)
+    {
+        if (catalog?.Reference == null) return string.Empty;
+
+        var owners = new[] { catalog.Reference.Description, catalog.ConnectionGroup }
+            .Where(owner => owner != null)
+            .Distinct();
+        foreach (var owner in owners)
+        {
+            var matchingLink = GetLinksFromOwner(owner).FirstOrDefault(link => link.Guid == linkGuid);
+            if (matchingLink != null) return matchingLink.Name ?? string.Empty;
+        }
+
+        return string.Empty;
+    }
+
     /// <summary>Безопасно читает публичное свойство API через reflection.</summary>
     /// <param name="source">Исходный объект API.</param>
     /// <param name="propertyName">Имя свойства.</param>
@@ -1202,40 +1257,45 @@ public class XmiSchemaExporterMacro : MacroProvider
             new XAttribute("visibility", "public"));
     }
 
-    /// <summary>Создаёт навигационное свойство класса для выбранной связи DOCs.</summary>
+    /// <summary>Создаёт UML ownedEnd для одного конца ассоциации с его ролью и кратностью.</summary>
     /// <param name="id">Идентификатор конца ассоциации.</param>
-    /// <param name="assocId">Идентификатор UML Association.</param>
-    /// <param name="targetGuid">Идентификатор целевого класса.</param>
+    /// <param name="assocId">Идентификатор ассоциации-владельца.</param>
+    /// <param name="classGuid">GUID класса, являющегося типом конца.</param>
+    /// <param name="role">Имя роли на этом конце.</param>
     /// <param name="lower">Нижняя граница кратности.</param>
-    /// <param name="upper">Верхняя граница кратности или символ бесконечности.</param>
-    /// <returns>Элемент ownedAttribute, принадлежащий классу-источнику.</returns>
-    private XElement CreateAssocProperty(string id, string assocId, string targetGuid, string lower, string upper)
+    /// <param name="upper">Верхняя граница кратности или -1/* для неограниченной.</param>
+    /// <returns>XML-элемент ownedEnd.</returns>
+    private XElement CreateOwnedEnd(string id, string assocId, string classGuid, string role, string lower, string upper)
     {
-        return new XElement("ownedAttribute",
+        bool unlimited = upper == "-1" || upper == "*";
+        return new XElement("ownedEnd",
             new XAttribute(xmi + "type", "uml:Property"), new XAttribute(xmi + "id", id),
+            string.IsNullOrEmpty(role) ? null : new XAttribute("name", role),
             new XAttribute("visibility", "public"), new XAttribute("association", assocId),
-            new XElement("type", new XAttribute(xmi + "idref", targetGuid)),
-            new XElement("lowerValue", new XAttribute(xmi + "type", "uml:LiteralInteger"), new XAttribute("value", lower)),
-            new XElement("upperValue", new XAttribute(xmi + "type", upper == "*" ? "uml:LiteralUnlimitedNatural" : "uml:LiteralInteger"), new XAttribute("value", upper == "*" ? "-1" : upper))
+            new XAttribute("isStatic", "false"),
+            new XAttribute("isReadOnly", "true"),
+            new XAttribute("aggregation", "none"),
+            new XElement("type", new XAttribute(xmi + "idref", classGuid)),
+            new XElement("lowerValue",
+                new XAttribute(xmi + "type", "uml:LiteralInteger"),
+                new XAttribute(xmi + "id", $"{id}_lower"),
+                new XAttribute("value", lower)),
+            new XElement("upperValue",
+                new XAttribute(xmi + "type", unlimited ? "uml:LiteralUnlimitedNatural" : "uml:LiteralInteger"),
+                new XAttribute(xmi + "id", $"{id}_upper"),
+                new XAttribute("value", unlimited ? "-1" : upper))
         );
     }
 
-    /// <summary>Создаёт противоположный конец UML Association с типом и кратностью.</summary>
-    /// <param name="id">Идентификатор конца связи.</param>
-    /// <param name="assocId">Идентификатор ассоциации-владельца.</param>
-    /// <param name="sourceGuid">GUID класса, являющегося типом конца.</param>
-    /// <param name="lower">Минимальная кратность.</param>
-    /// <param name="upper">Максимальная кратность или символ бесконечности.</param>
-    /// <returns>XML-элемент ownedEnd.</returns>
-    private XElement CreateOwnedEnd(string id, string assocId, string sourceGuid, string lower, string upper)
+    /// <summary>Форматирует нижнюю и верхнюю границы кратности для EA-коннектора.</summary>
+    /// <param name="lower">Нижняя граница кратности.</param>
+    /// <param name="upper">Верхняя граница или -1/* для неограниченной кратности.</param>
+    /// <returns>Значение кратности в формате EA.</returns>
+    private static string FormatMultiplicity(string lower, string upper)
     {
-        return new XElement("ownedEnd",
-            new XAttribute(xmi + "type", "uml:Property"), new XAttribute(xmi + "id", id),
-            new XAttribute("visibility", "public"), new XAttribute("association", assocId),
-            new XElement("type", new XAttribute(xmi + "idref", sourceGuid)),
-            new XElement("lowerValue", new XAttribute(xmi + "type", "uml:LiteralInteger"), new XAttribute("value", lower)),
-            new XElement("upperValue", new XAttribute(xmi + "type", upper == "*" ? "uml:LiteralUnlimitedNatural" : "uml:LiteralInteger"), new XAttribute("value", upper == "*" ? "-1" : upper))
-        );
+        string normalizedUpper = upper == "-1" ? "*" : upper;
+        if (lower == normalizedUpper) return lower;
+        return $"{lower}..{normalizedUpper}";
     }
 
     /// <summary>Переводит тип связи DOCs в кратности концов UML-ассоциации.</summary>
@@ -1389,16 +1449,37 @@ public class XmiSchemaExporterMacro : MacroProvider
         var connectors = new XElement("connectors");
         foreach (var a in assocs)
         {
-            var properties = new XElement("properties", new XAttribute("ea_type", "Association"));
-            if (!string.IsNullOrWhiteSpace(a.Direction))
-                properties.Add(new XAttribute("direction", a.Direction));
+            string srcMult = FormatMultiplicity(a.SourceLower, a.SourceUpper);
+            string dstMult = FormatMultiplicity(a.TargetLower, a.TargetUpper);
 
-            connectors.Add(new XElement("connector", new XAttribute(xmi + "idref", a.AssocGuid),
-                new XAttribute("name", a.Name ?? string.Empty),
-                new XElement("source", new XAttribute(xmi + "idref", a.SourceClassGuid)),
-                new XElement("target", new XAttribute(xmi + "idref", a.TargetClassGuid)),
-                properties
-            ));
+            var connector = new XElement("connector",
+                new XAttribute(xmi + "idref", a.AssocGuid),
+                string.IsNullOrEmpty(a.Name) ? null : new XAttribute("name", a.Name),
+                new XElement("source",
+                    new XAttribute(xmi + "idref", a.SourceClassGuid),
+                    new XElement("model", new XAttribute("type", "Class"), new XAttribute("name", a.SourceClassName)),
+                    string.IsNullOrEmpty(a.SourceRole) ? null : new XElement("role",
+                        new XAttribute("name", a.SourceRole), new XAttribute("visibility", "Public")),
+                    new XElement("type", new XAttribute("multiplicity", srcMult), new XAttribute("aggregation", "none")),
+                    new XElement("modifiers", new XAttribute("isOrdered", "false"), new XAttribute("isNavigable", "true")),
+                    new XElement("style", new XAttribute("value", "Owned=0;Navigable=Unspecified;"))),
+                new XElement("target",
+                    new XAttribute(xmi + "idref", a.TargetClassGuid),
+                    new XElement("model", new XAttribute("type", "Class"), new XAttribute("name", a.TargetClassName)),
+                    string.IsNullOrEmpty(a.TargetRole) ? null : new XElement("role",
+                        new XAttribute("name", a.TargetRole), new XAttribute("visibility", "Public")),
+                    new XElement("type", new XAttribute("multiplicity", dstMult), new XAttribute("aggregation", "none")),
+                    new XElement("modifiers", new XAttribute("isOrdered", "false"), new XAttribute("isNavigable", "false")),
+                    new XElement("style", new XAttribute("value", "Owned=0;Navigable=Unspecified;"))),
+                new XElement("properties",
+                    new XAttribute("ea_type", "Association"),
+                    new XAttribute("direction", a.Direction ?? "Unspecified")),
+                new XElement("labels",
+                    new XAttribute("lb", srcMult),
+                    string.IsNullOrEmpty(a.SourceRole) ? null : new XAttribute("lt", $"+{a.SourceRole}"),
+                    new XAttribute("rb", dstMult),
+                    string.IsNullOrEmpty(a.TargetRole) ? null : new XAttribute("rt", $"+{a.TargetRole}")));
+            connectors.Add(connector);
         }
         foreach (var association in catalogTypeAssocs)
         {
@@ -1436,10 +1517,14 @@ public class XmiSchemaExporterMacro : MacroProvider
     private static void AddOwnedComment(XElement umlElement, string comment)
     {
         if (!string.IsNullOrWhiteSpace(comment))
+        {
+            string ownerGuid = Convert.ToString(umlElement.Attribute(xmi + "id"));
             umlElement.Add(new XElement("ownedComment",
                 new XAttribute(xmi + "type", "uml:Comment"),
-                new XAttribute(xmi + "id", CreateEaId()),
+                new XAttribute(xmi + "id", FormatEaId(
+                    CreateDeterministicGuid($"Comment_{ownerGuid}"))),
                 new XElement("body", comment)));
+        }
     }
 
     /// <summary>Добавляет настройки справочника в EA-раздел tagged values.</summary>
@@ -1453,7 +1538,8 @@ public class XmiSchemaExporterMacro : MacroProvider
         foreach (var setting in settings)
         {
             tags.Add(new XElement("tag",
-                new XAttribute(xmi + "id", CreateEaId()),
+                new XAttribute(xmi + "id", FormatEaId(
+                    CreateDeterministicGuid($"Tag_{modelElement}_{setting.Key}"))),
                 new XAttribute("name", setting.Key),
                 new XAttribute("value", setting.Value ?? string.Empty),
                 new XAttribute("modelElement", modelElement)));
@@ -1462,12 +1548,26 @@ public class XmiSchemaExporterMacro : MacroProvider
         if (index > 0) element.Add(tags);
     }
 
-    /// <summary>Генерирует уникальный EAID в формате GUID с разделителями.</summary>
-    /// <returns>Новый XMI ID.</returns>
-    private static string CreateEaId()
+    /// <summary>Создаёт детерминированный GUID на основе стабильного строкового ключа DOCs.</summary>
+    /// <param name="sourceKey">Стабильный ключ исходной сущности или производного элемента.</param>
+    /// <returns>GUID, вычисленный через MD5; для пустого ключа возвращается Guid.Empty.</returns>
+    private static Guid CreateDeterministicGuid(string sourceKey)
     {
-        string guid = System.Guid.NewGuid().ToString("N").ToUpperInvariant();
-        return $"EAID_{guid.Substring(0, 8)}_{guid.Substring(8, 4)}_{guid.Substring(12, 4)}_{guid.Substring(16, 4)}_{guid.Substring(20, 12)}";
+        if (string.IsNullOrEmpty(sourceKey)) return Guid.Empty;
+        using (var md5 = System.Security.Cryptography.MD5.Create())
+        {
+            byte[] hash = md5.ComputeHash(Encoding.UTF8.GetBytes(sourceKey));
+            return new Guid(hash);
+        }
+    }
+
+    /// <summary>Форматирует GUID как стабильный XMI/EA идентификатор.</summary>
+    /// <param name="guid">GUID исходной или производной сущности.</param>
+    /// <param name="prefix">Префикс идентификатора EA.</param>
+    /// <returns>Идентификатор с заданным префиксом и GUID без разделителей.</returns>
+    private static string FormatEaId(Guid guid, string prefix = "EAID_")
+    {
+        return prefix + guid.ToString("N").ToUpperInvariant();
     }
 
     /// <summary>Создаёт применения пользовательских стереотипов и тегов профиля.</summary>
@@ -1570,6 +1670,7 @@ public class XmiSchemaExporterMacro : MacroProvider
                 string.Equals(Convert.ToString(GetPropertyValue(item, "Name")), type.Имя, StringComparison.Ordinal));
             var cls = new ClassModel
             {
+                Guid = FormatEaId(GetClassGuid(type, sourceClass, reference.Guid)),
                 Name = type.Имя,
                 CatalogGuid = catalogGuid,
                 SourceClass = sourceClass,
@@ -1579,7 +1680,15 @@ public class XmiSchemaExporterMacro : MacroProvider
             foreach (var parameter in context.Parameters.Where(parameter => IsParameterAttachedToType(parameter, type, sourceClass)))
             {
                 var (typeRef, eaType) = MapType(parameter.Type);
-                cls.Parameters.Add(new ParamModel { Name = parameter.Name, TypeRef = typeRef, EaType = eaType });
+                cls.Parameters.Add(new ParamModel
+                {
+                    Guid = FormatEaId(parameter.Guid != Guid.Empty
+                        ? parameter.Guid
+                        : CreateDeterministicGuid($"Parameter_{reference.Guid}_{type.Имя}_{parameter.Name}")),
+                    Name = parameter.Name,
+                    TypeRef = typeRef,
+                    EaType = eaType
+                });
             }
             list.Add(cls);
         }
@@ -1589,6 +1698,7 @@ public class XmiSchemaExporterMacro : MacroProvider
             var connectionGroup = context.ConnectionGroup ?? FindConnectionGroup(reference);
             var connection = new ClassModel
             {
+                Guid = FormatEaId(GetConnectionGroupGuid(connectionGroup, reference.Guid)),
                 Name = "Подключение",
                 CatalogGuid = catalogGuid,
                 SourceClass = connectionGroup,
@@ -1600,12 +1710,49 @@ public class XmiSchemaExporterMacro : MacroProvider
             foreach (var parameter in context.ConnectionParameters ?? new List<ParameterInfo>())
             {
                 var (typeRef, eaType) = MapType(parameter.Type);
-                connection.Parameters.Add(new ParamModel { Name = parameter.Name, TypeRef = typeRef, EaType = eaType });
+                connection.Parameters.Add(new ParamModel
+                {
+                    Guid = FormatEaId(parameter.Guid != Guid.Empty
+                        ? parameter.Guid
+                        : CreateDeterministicGuid(
+                            $"ConnectionParameter_{reference.Guid}_{parameter.Group?.Guid}_{parameter.Name}")),
+                    Name = parameter.Name,
+                    TypeRef = typeRef,
+                    EaType = eaType
+                });
             }
             list.Add(connection);
         }
 
         return list;
+    }
+
+    /// <summary>Получает GUID типа DOCs или создаёт стабильный резервный GUID.</summary>
+    /// <param name="type">Тип-обёртка, выбранный в диалоге DOCs.</param>
+    /// <param name="sourceClass">Модельный ClassObject, если он найден.</param>
+    /// <param name="referenceGuid">GUID справочника-владельца.</param>
+    /// <returns>Исходный GUID типа либо детерминированный GUID по справочнику и имени.</returns>
+    private static Guid GetClassGuid(ТипОбъекта type, object sourceClass, Guid referenceGuid)
+    {
+        Guid typeGuid = ReadGuid(type, "Guid", "GUID", "ClassGuid");
+        if (typeGuid != Guid.Empty) return typeGuid;
+
+        Guid classGuid = ReadGuid(sourceClass, "Guid", "GUID", "ClassGuid");
+        if (classGuid != Guid.Empty) return classGuid;
+
+        return CreateDeterministicGuid($"Class_{referenceGuid}_{type?.Имя}");
+    }
+
+    /// <summary>Получает GUID группы подключения либо стабильный GUID от справочника.</summary>
+    /// <param name="connectionGroup">Группа подключения T-FLEX DOCs.</param>
+    /// <param name="referenceGuid">GUID справочника-владельца.</param>
+    /// <returns>GUID группы или детерминированный GUID подключения.</returns>
+    private static Guid GetConnectionGroupGuid(object connectionGroup, Guid referenceGuid)
+    {
+        Guid connectionGuid = ReadGuid(connectionGroup, "Guid", "GUID", "GroupGuid");
+        return connectionGuid != Guid.Empty
+            ? connectionGuid
+            : CreateDeterministicGuid($"Connection_{referenceGuid}");
     }
 
     /// <summary>Проверяет принадлежность выбранного параметра конкретному типу, не размножая поля каталога.</summary>
@@ -1771,8 +1918,14 @@ public class XmiSchemaExporterMacro : MacroProvider
                 association != null && association.Name == associationName && association.TargetClassGuid == objectClass.Guid))
             return;
 
+        string associationSeed = associationName == "Родительский объект" ? "Parent" : "Child";
+        Guid associationGuid = CreateDeterministicGuid(
+            $"{associationSeed}_{connectionClass.Guid}_{objectClass.Guid}");
         var association = new AssocModel
         {
+            AssocGuid = FormatEaId(associationGuid),
+            SrcPropGuid = FormatEaId(associationGuid, "EAID_src_"),
+            DstPropGuid = FormatEaId(associationGuid, "EAID_dst_"),
             Name = associationName,
             // Стрелка начинается у подключения и направлена к объекту справочника.
             SourceClassGuid = connectionClass.Guid,
@@ -1814,8 +1967,13 @@ public class XmiSchemaExporterMacro : MacroProvider
                     if (parentClass.Associations.Any(association =>
                             association != null && association.Name == "Состоит из" && association.TargetClassGuid == childClass.Guid)) continue;
 
+                    Guid associationGuid = CreateDeterministicGuid(
+                        $"ConsistsOf_{parentClass.Guid}_{childClass.Guid}");
                     var association = new AssocModel
                     {
+                        AssocGuid = FormatEaId(associationGuid),
+                        SrcPropGuid = FormatEaId(associationGuid, "EAID_src_"),
+                        DstPropGuid = FormatEaId(associationGuid, "EAID_dst_"),
                         Name = "Состоит из",
                         SourceClassGuid = parentClass.Guid,
                         SourceClassName = parentClass.Name,
@@ -1824,7 +1982,8 @@ public class XmiSchemaExporterMacro : MacroProvider
                         SourceLower = "0",
                         SourceUpper = "1",
                         TargetLower = "0",
-                        TargetUpper = "*"
+                        TargetUpper = "*",
+                        Direction = "Source -> Destination"
                     };
                     parentClass.Associations.Add(association);
                     allAssocs.Add(association);
