@@ -1408,12 +1408,20 @@ public class XmiSchemaExporterMacro : MacroProvider
                 el.Add(attrs);
             }
             el.Add(new XElement("extendedProperties", new XAttribute("tagged", "0"), new XAttribute("package_name", catalogs.First(item => item.Guid == cls.CatalogGuid).Name)));
-            var typeLinks = catalogTypeAssocs.Where(item => item.TypeGuid == cls.Guid)
+            var allClassLinks = catalogTypeAssocs
+                .Where(item => item.TypeGuid == cls.Guid)
                 .Select(item => new XElement("Association",
                     new XAttribute(xmi + "id", item.Guid),
                     new XAttribute("start", item.CatalogGuid),
-                    new XAttribute("end", item.TypeGuid)));
-            el.Add(new XElement("links", typeLinks));
+                    new XAttribute("end", item.TypeGuid)))
+                .Concat(assocs
+                    .Where(association => association.SourceClassGuid == cls.Guid ||
+                                          association.TargetClassGuid == cls.Guid)
+                    .Select(association => new XElement("Association",
+                        new XAttribute(xmi + "id", association.AssocGuid),
+                        new XAttribute("start", association.SourceClassGuid),
+                        new XAttribute("end", association.TargetClassGuid))));
+            el.Add(new XElement("links", allClassLinks));
             el.Add(new XElement("xrefs"));
             elems.Add(el);
         }
@@ -1677,14 +1685,18 @@ public class XmiSchemaExporterMacro : MacroProvider
                 SourceType = type,
                 Comment = Convert.ToString(GetPropertyValue(sourceClass, "Comment"))
             };
-            foreach (var parameter in context.Parameters.Where(parameter => IsParameterAttachedToType(parameter, type, sourceClass)))
+            var attachedParams = context.Parameters
+                .Where(parameter => IsParameterAttachedToType(parameter, type, sourceClass, reference))
+                .GroupBy(parameter => parameter.Guid)
+                .Select(group => group.First());
+            foreach (var parameter in attachedParams)
             {
                 var (typeRef, eaType) = MapType(parameter.Type);
+                string attrId = FormatEaId(CreateDeterministicGuid(
+                    $"Property_{cls.Guid}_{parameter.Guid}"));
                 cls.Parameters.Add(new ParamModel
                 {
-                    Guid = FormatEaId(parameter.Guid != Guid.Empty
-                        ? parameter.Guid
-                        : CreateDeterministicGuid($"Parameter_{reference.Guid}_{type.Имя}_{parameter.Name}")),
+                    Guid = attrId,
                     Name = parameter.Name,
                     TypeRef = typeRef,
                     EaType = eaType
@@ -1710,12 +1722,11 @@ public class XmiSchemaExporterMacro : MacroProvider
             foreach (var parameter in context.ConnectionParameters ?? new List<ParameterInfo>())
             {
                 var (typeRef, eaType) = MapType(parameter.Type);
+                string connectionAttrId = FormatEaId(CreateDeterministicGuid(
+                    $"ConnectionProperty_{connection.Guid}_{parameter.Guid}"));
                 connection.Parameters.Add(new ParamModel
                 {
-                    Guid = FormatEaId(parameter.Guid != Guid.Empty
-                        ? parameter.Guid
-                        : CreateDeterministicGuid(
-                            $"ConnectionParameter_{reference.Guid}_{parameter.Group?.Guid}_{parameter.Name}")),
+                    Guid = connectionAttrId,
                     Name = parameter.Name,
                     TypeRef = typeRef,
                     EaType = eaType
@@ -1755,35 +1766,87 @@ public class XmiSchemaExporterMacro : MacroProvider
             : CreateDeterministicGuid($"Connection_{referenceGuid}");
     }
 
-    /// <summary>Проверяет принадлежность выбранного параметра конкретному типу, не размножая поля каталога.</summary>
+    /// <summary>Проверяет принадлежность параметра типу с учётом общей группы и наследования.</summary>
     /// <param name="parameter">Параметр, выбранный пользователем.</param>
     /// <param name="sourceType">Wrapper-тип DOCs или группа подключения.</param>
-    /// <param name="sourceClass">Модельный ClassObject типа или группы.</param>
-    /// <returns>true только при подтверждённом совпадении GUID параметра или его группы.</returns>
-    private static bool IsParameterAttachedToType(ParameterInfo parameter, object sourceType, object sourceClass)
+    /// <param name="sourceClass">Модельный ClassObject типа.</param>
+    /// <param name="reference">Справочник-владелец типов и главной группы параметров.</param>
+    /// <returns>true, если параметр принадлежит типу напрямую, через базовый тип или как общий параметр.</returns>
+    private static bool IsParameterAttachedToType(
+        ParameterInfo parameter,
+        object sourceType,
+        object sourceClass,
+        ReferenceInfo reference)
     {
         if (parameter == null) return false;
 
-        foreach (var owner in new[] { sourceType, sourceClass }.Where(owner => owner != null))
+        // Главная группа справочника содержит общие параметры всех его типов.
+        var mainGroup = GetPropertyValue(reference?.Description, "MainGroup");
+        Guid mainGroupGuid = ReadGuid(mainGroup, "Guid", "GUID");
+        Guid parameterGroupGuid = parameter.Group?.Guid ?? Guid.Empty;
+        if (parameterGroupGuid != Guid.Empty &&
+            (parameterGroupGuid == mainGroupGuid ||
+             string.Equals(parameter.Group?.Name, "Общие параметры", StringComparison.CurrentCultureIgnoreCase) ||
+             string.Equals(parameter.Group?.Name, reference?.Name, StringComparison.CurrentCultureIgnoreCase)))
         {
-            foreach (string propertyName in new[] { "Parameters", "Параметры", "ParameterList" })
+            return true;
+        }
+
+        // ClassTree DOCs знает о наследуемых группах и возвращает все подходящие классы.
+        if (reference?.Classes != null && parameter.Group != null && sourceClass is ClassObject targetClass)
+        {
+            try
             {
-                var values = GetEnumerableProperty(owner, propertyName).ToList();
-                if (values.Count == 0) continue;
-                if (values.Any(value => ReadGuid(value, "Guid", "ParameterGuid", "GUID") == parameter.Guid))
+                var classesWithGroup = reference.Classes.GetParameterGroupClasses(
+                    parameter.Group,
+                    includeInherit: true);
+                if (classesWithGroup != null &&
+                    classesWithGroup.Any(classObject => classObject != null && classObject.Guid == targetClass.Guid))
                     return true;
+            }
+            catch { }
+        }
+
+        // Явно обходим BaseClass на случай, если ClassTree не смог вернуть наследников.
+        if (sourceClass is ClassObject classObject)
+        {
+            var current = classObject;
+            var visited = new HashSet<Guid>();
+            while (current != null && visited.Add(current.Guid))
+            {
+                try
+                {
+                    if (GetEnumerableProperty(current, "Parameters")
+                        .Any(item => ReadGuid(item, "Guid", "ParameterGuid", "GUID") == parameter.Guid))
+                        return true;
+                }
+                catch { }
+
+                try
+                {
+                    if (parameterGroupGuid != Guid.Empty && current.ParameterGroups != null &&
+                        current.ParameterGroups.Any(group => group != null && group.Guid == parameterGroupGuid))
+                        return true;
+                }
+                catch { }
+
+                current = GetPropertyValue(current, "BaseClass") as ClassObject;
             }
         }
 
-        var parameterGroupGuid = parameter.Group?.Guid ?? Guid.Empty;
-        if (parameterGroupGuid == Guid.Empty) return false;
-
-        foreach (var owner in new[] { sourceType, sourceClass }.Where(owner => owner != null))
+        // Wrapper-тип служит последним совместимым способом прочитать связи параметра с типом.
+        if (sourceType != null)
         {
-            foreach (string propertyName in new[] { "ParameterGroups", "ГруппыПараметров", "Groups", "Группы" })
+            foreach (string propertyName in new[]
+                     {
+                         "Parameters", "Параметры", "ParameterGroups", "ГруппыПараметров"
+                     })
             {
-                if (GetEnumerableProperty(owner, propertyName)
-                    .Any(group => ReadGuid(group, "Guid", "GroupGuid", "GUID") == parameterGroupGuid))
+                if (GetEnumerableProperty(sourceType, propertyName).Any(item =>
+                    (parameter.Guid != Guid.Empty &&
+                     ReadGuid(item, "Guid", "ParameterGuid", "GroupGuid", "GUID") == parameter.Guid) ||
+                        (parameterGroupGuid != Guid.Empty &&
+                         ReadGuid(item, "Guid", "GroupGuid", "GUID") == parameterGroupGuid)))
                     return true;
             }
         }
