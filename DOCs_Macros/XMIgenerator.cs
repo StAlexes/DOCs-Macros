@@ -8,6 +8,7 @@ using System.Xml;
 using System.Xml.Linq;
 using BindingFlags = System.Reflection.BindingFlags;
 using TFlex.DOCs.Model;
+using TFlex.DOCs.Model.Classes;
 using TFlex.DOCs.Model.Macros;
 using TFlex.DOCs.Model.Macros.ObjectModel;
 using TFlex.DOCs.Model.Structure;
@@ -711,15 +712,19 @@ public class XmiSchemaExporterMacro : MacroProvider
         {
             if (link?.Link == null || link.Master?.Reference == null || link.Slave?.Reference == null)
                 continue;
+
+            // Источник должен содержать связь в собственных группах параметров.
             var masterClasses = classesByReferenceGuid[link.Master.Reference.Guid]
                 .Where(classModel => link.IsConnectionRelation
-                    ? classModel.IsConnection
-                    : !classModel.IsConnection && SupportsParameterGroup(classModel, link.Link.Guid))
+                    ? classModel.IsConnection && IsLinkAttachedToMasterClass(classModel, link.Link)
+                    : !classModel.IsConnection && IsLinkAttachedToMasterClass(classModel, link.Link))
                 .ToList();
-            var slaveGroupGuid = link.Link.SlaveGroup?.Guid ?? Guid.Empty;
+
+            // Получатель проверяется по ограничениям самой связи, а не по SlaveGroup.
             var slaveClasses = classesByReferenceGuid[link.Slave.Reference.Guid]
-                .Where(classModel => !classModel.IsConnection && slaveGroupGuid != Guid.Empty && SupportsParameterGroup(classModel, slaveGroupGuid))
+                .Where(classModel => !classModel.IsConnection && IsLinkAllowedForSlaveClass(classModel, link.Link))
                 .ToList();
+
             foreach (var masterClass in masterClasses)
             {
                 foreach (var slaveClass in slaveClasses)
@@ -1527,54 +1532,99 @@ public class XmiSchemaExporterMacro : MacroProvider
         var parameterGroupGuid = parameter.Group?.Guid ?? Guid.Empty;
         if (parameterGroupGuid == Guid.Empty) return false;
 
-        var typeGroupGuids = GetTypeParameterGroupGuids(sourceType, sourceClass);
-        return typeGroupGuids.Contains(parameterGroupGuid);
-    }
-
-    /// <summary>Собирает группы параметров типа и его базовых классов, используя совместимые имена API.</summary>
-    /// <param name="sourceType">Объект типа DOCs.</param>
-    /// <param name="sourceClass">Объект ClassObject, если он найден.</param>
-    /// <returns>GUID групп, явно назначенных типу или его предкам.</returns>
-    private static HashSet<Guid> GetTypeParameterGroupGuids(object sourceType, object sourceClass)
-    {
-        var result = new HashSet<Guid>();
-        var visited = new HashSet<object>();
-        var pending = new Queue<object>();
-        if (sourceType != null) pending.Enqueue(sourceType);
-        if (sourceClass != null) pending.Enqueue(sourceClass);
-
-        while (pending.Count > 0)
+        foreach (var owner in new[] { sourceType, sourceClass }.Where(owner => owner != null))
         {
-            var current = pending.Dequeue();
-            if (current == null || !visited.Add(current)) continue;
-
             foreach (string propertyName in new[] { "ParameterGroups", "ГруппыПараметров", "Groups", "Группы" })
             {
-                foreach (var group in GetEnumerableProperty(current, propertyName))
-                {
-                    Guid groupGuid = ReadGuid(group, "Guid", "GroupGuid", "GUID");
-                    if (groupGuid != Guid.Empty) result.Add(groupGuid);
-                }
-            }
-
-            foreach (string baseProperty in new[] { "Base", "BaseClass", "БазовыйТип" })
-            {
-                var baseClass = GetPropertyValue(current, baseProperty);
-                if (baseClass != null) pending.Enqueue(baseClass);
+                if (GetEnumerableProperty(owner, propertyName)
+                    .Any(group => ReadGuid(group, "Guid", "GroupGuid", "GUID") == parameterGroupGuid))
+                    return true;
             }
         }
 
-        return result;
+        return false;
     }
 
-    /// <summary>Проверяет наличие связи или группы slave в наборах параметров конкретного типа.</summary>
-    /// <param name="classModel">Экспортируемый класс типа.</param>
-    /// <param name="groupGuid">GUID link group на master-стороне либо slave group на целевой стороне.</param>
-    /// <returns>true только если группа объявлена у типа или унаследованного базового типа.</returns>
-    private static bool SupportsParameterGroup(ClassModel classModel, Guid groupGuid)
+    /// <summary>
+    /// Проверяет, подключена ли связь к конкретному типу-источнику (Master).
+    /// Связь принадлежит типу, только если явно присутствует в его группах параметров.
+    /// </summary>
+    /// <param name="classModel">Экспортируемый класс типа DOCs.</param>
+    /// <param name="linkGroup">Связь, принадлежность которой проверяется.</param>
+    /// <returns>true, если связь явно привязана к типу или является структурной связью подключения.</returns>
+    private static bool IsLinkAttachedToMasterClass(ClassModel classModel, ParameterGroup linkGroup)
     {
-        if (classModel == null || classModel.IsConnection || groupGuid == Guid.Empty) return false;
-        return GetTypeParameterGroupGuids(classModel.SourceType, classModel.SourceClass).Contains(groupGuid);
+        if (classModel == null || linkGroup == null) return false;
+        if (classModel.IsConnection) return true;
+
+        if (classModel.SourceClass is ClassObject classObject)
+        {
+            try
+            {
+                if (classObject.ParameterGroups != null &&
+                    classObject.ParameterGroups.Any(group => group != null && group.Guid == linkGroup.Guid))
+                    return true;
+            }
+            catch { }
+
+            try
+            {
+                if (classObject.SwappedToSelfParameterGroups != null &&
+                    classObject.SwappedToSelfParameterGroups.Any(group => group != null && group.Guid == linkGroup.Guid))
+                    return true;
+            }
+            catch { }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    /// <summary>Проверяет допустимость типа-приёмника через разрешённые классы самой связи.</summary>
+    /// <param name="slaveClassModel">Экспортируемый класс типа-приёмника.</param>
+    /// <param name="linkGroup">Связь, настройки которой задают допустимые типы-приёмники.</param>
+    /// <returns>true, если тип разрешён связью либо у связи не задано ограничение по типам.</returns>
+    private static bool IsLinkAllowedForSlaveClass(ClassModel slaveClassModel, ParameterGroup linkGroup)
+    {
+        if (slaveClassModel == null || linkGroup == null) return false;
+
+        try
+        {
+            var allowedClasses = linkGroup.GetAllowedClassesToLink();
+            if (allowedClasses != null && allowedClasses.Count > 0)
+            {
+                if (slaveClassModel.SourceClass is ClassObject slaveClassObject)
+                    return allowedClasses.Any(allowedClass =>
+                        allowedClass != null &&
+                        (allowedClass.Guid == slaveClassObject.Guid || allowedClass.IsBaseClassFor(slaveClassObject)));
+
+                return allowedClasses.Any(allowedClass => IsSameClassModel(slaveClassModel, allowedClass));
+            }
+        }
+        catch { }
+
+        return true;
+    }
+
+    /// <summary>Сопоставляет модель типа с классом DOCs по GUID или имени.</summary>
+    /// <param name="model">Класс экспортной модели.</param>
+    /// <param name="classObj">Объект класса, возвращённый API T-FLEX DOCs.</param>
+    /// <returns>true, если объекты представляют один тип.</returns>
+    private static bool IsSameClassModel(ClassModel model, object classObj)
+    {
+        if (model == null || classObj == null) return false;
+
+        Guid objectGuid = ReadGuid(classObj, "Guid", "GUID", "ClassGuid");
+        if (objectGuid != Guid.Empty)
+        {
+            return ReadGuid(model.SourceClass, "Guid", "GUID", "ClassGuid") == objectGuid ||
+                   ReadGuid(model.SourceType, "Guid", "GUID", "ClassGuid") == objectGuid;
+        }
+
+        string name = Convert.ToString(GetPropertyValue(classObj, "Name") ?? GetPropertyValue(classObj, "Имя"));
+        return !string.IsNullOrWhiteSpace(name) &&
+               string.Equals(model.Name, name, StringComparison.Ordinal);
     }
 
     /// <summary>Создаёт физические связи сложной иерархии через псевдокласс «Подключение».</summary>
