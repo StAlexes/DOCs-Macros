@@ -3,7 +3,7 @@
 //
 // Архитектура макроса:
 //   XmiSchemaExporterMacro  — точка входа (MacroProvider): стартовый диалог и оркестрация.
-//   ModelCollector          — сбор модели DOCs (3 режима выгрузки, прямой вызов API).
+//   ModelCollector          — сбор модели DOCs (2 режима выгрузки, прямой вызов API).
 //   XmiDocumentWriter       — изоляция генерации готового XMI 2.1 / Enterprise Architect.
 //
 // Вся работа с моделью данных T-FLEX DOCs выполняется ТОЛЬКО через прямые свойства API
@@ -25,11 +25,10 @@ using TFlex.DOCs.Model.Structure;
 /// <summary>Режим выгрузки схемы справочников T-FLEX DOCs в XMI.</summary>
 public enum ExportMode
 {
-    /// <summary>1. Полная выгрузка всех справочников сервера.</summary>
-    Full,
-    /// <summary>2. Выгрузка только указанных справочников (все их типы).</summary>
+    /// <summary>1. Выбор справочников (штатный элемент выборки со встроенным «Выбрать все»).</summary>
     SelectedReferences,
-    /// <summary>3. Выгрузка указанных типов (пошаговый ручной выбор).</summary>
+
+    /// <summary>2. Выбор конкретных типов и их параметров.</summary>
     SelectedTypes
 }
 
@@ -66,6 +65,12 @@ public sealed class CatalogSelection
 
     /// <summary>Отдельно выбранные параметры группы структурного подключения.</summary>
     public List<ParameterInfo> ConnectionParameters { get; set; } = new List<ParameterInfo>();
+
+    /// <summary>Автоматически собранные связи справочника (режим выбора справочников целиком).</summary>
+    public List<ParameterGroup> SelectedLinks { get; set; } = new List<ParameterGroup>();
+
+    /// <summary>Параметры всех автоматически собранных связей справочника.</summary>
+    public List<ParameterInfo> SelectedLinkParameters { get; set; } = new List<ParameterInfo>();
 }
 
 /// <summary>Связь DOCs между выбранными каталогами с зафиксированными master/slave-контекстами.</summary>
@@ -240,9 +245,8 @@ public class XmiSchemaExporterMacro : MacroProvider
     public XmiSchemaExporterMacro(MacroContext context) : base(context) { }
 
     internal const string ModeField = "Режим выгрузки";
-    internal const string ModeOptionFull = "1. Полная выгрузка всех справочников";
-    internal const string ModeOptionRefs = "2. Выгрузка указанных справочников";
-    internal const string ModeOptionTypes = "3. Выгрузка указанных типов";
+    internal const string ModeOptionRefs = "1. Выгрузка указанных справочников";
+    internal const string ModeOptionTypes = "2. Выгрузка указанных типов";
     // Заголовок группы ОБЯЗАН отличаться от ModeField: поиск элемента в диалоге идёт по имени
     // и возвращает первый совпавший, поэтому одноимённая группа перекрывает поле выбора режима.
     internal const string ModeGroupCaption = "Выбор режима";
@@ -277,9 +281,8 @@ public class XmiSchemaExporterMacro : MacroProvider
         dialog.ДобавитьГруппу(ModeGroupCaption);
         // ВАЖНО: перегрузка без значения по умолчанию оставляет поле пустым (GetValue вернёт null),
         // поэтому явно задаём предустановленный режим и делаем поле обязательным.
-        dialog.ДобавитьВыборИзСписка(ModeField, ModeOptionFull, true, new object[]
+        dialog.ДобавитьВыборИзСписка(ModeField, ModeOptionRefs, true, new object[]
         {
-            ModeOptionFull,
             ModeOptionRefs,
             ModeOptionTypes
         });
@@ -302,12 +305,11 @@ public class XmiSchemaExporterMacro : MacroProvider
 
     /// <summary>Сопоставляет выбранный пункт списка режимов с режимом выгрузки.</summary>
     /// <param name="value">Значение поля режима из диалога (текст пункта либо его индекс).</param>
-    /// <returns>Режим выгрузки; при нераспознанном значении — полная выгрузка.</returns>
+    /// <returns>Режим выгрузки; при нераспознанном значении — выбор справочников.</returns>
     private static ExportMode ParseMode(object value)
     {
         string text = Convert.ToString(value)?.Trim() ?? string.Empty;
 
-        if (string.Equals(text, ModeOptionFull, StringComparison.OrdinalIgnoreCase)) return ExportMode.Full;
         if (string.Equals(text, ModeOptionRefs, StringComparison.OrdinalIgnoreCase)) return ExportMode.SelectedReferences;
         if (string.Equals(text, ModeOptionTypes, StringComparison.OrdinalIgnoreCase)) return ExportMode.SelectedTypes;
 
@@ -316,14 +318,13 @@ public class XmiSchemaExporterMacro : MacroProvider
         {
             switch (index)
             {
-                case 0: return ExportMode.Full;
-                case 1: return ExportMode.SelectedReferences;
-                case 2: return ExportMode.SelectedTypes;
+                case 0: return ExportMode.SelectedReferences;
+                case 1: return ExportMode.SelectedTypes;
             }
         }
 
-        // Пустое значение трактуем как предустановленный (первый) пункт списка — полную выгрузку.
-        return ExportMode.Full;
+        // Пустое значение трактуем как предустановленный (первый) пункт списка — выбор справочников.
+        return ExportMode.SelectedReferences;
     }
 
     /// <summary>Считывает значение флажка из диалога ввода с безопасным значением по умолчанию.</summary>
@@ -374,19 +375,15 @@ internal sealed class ModelCollector
 
         switch (options.Mode)
         {
-            case ExportMode.Full:
-                // Режим 1: ни одного диалога — все справочники, типы, параметры и связи автоматически.
-                CollectFullModel(data);
-                break;
-
             case ExportMode.SelectedReferences:
-                // Режим 2: только диалог выбора справочников; типы, параметры и связи — автоматически.
+                // Режим 1: только диалог выбора справочников (со встроенным «Выбрать все»);
+                // типы, параметры и связи — автоматически.
                 CollectSelectedReferencesModel(data);
                 break;
 
             case ExportMode.SelectedTypes:
             default:
-                // Режим 3: пошаговый интерактивный выбор справочника, типов, параметров и связей.
+                // Режим 2: пошаговый интерактивный выбор справочника, типов, параметров и связей.
                 CollectInteractiveModel(data);
                 break;
         }
@@ -405,30 +402,7 @@ internal sealed class ModelCollector
         public List<SelectedRelation> Relations { get; } = new List<SelectedRelation>();
     }
 
-    /// <summary>Режим 1: полная выгрузка всех справочников без единого диалога.</summary>
-    /// <param name="data">Накопитель, куда записываются справочники, типы, параметры и связи.</param>
-    private void CollectFullModel(CollectorData data)
-    {
-        List<ReferenceInfo> allReferences = GetAvailableReferences();
-        if (allReferences.Count == 0)
-        {
-            Inform("В системе не найдено ни одного справочника для выгрузки.");
-            return;
-        }
-
-        // Все типы (Classes.AllClasses), все параметры (Description.Parameters и все группы)
-        // и все связи (GetLinks) забираются автоматически, без диалогов выбора.
-        data.Selections.AddRange(BuildFullSelections(allReferences));
-        if (data.Selections.Count == 0)
-        {
-            Inform("Не найден ни один справочник с типами объектов для экспорта.");
-            return;
-        }
-
-        data.Relations.AddRange(CollectRelations(data.Selections, false));
-    }
-
-    /// <summary>Режим 2: выбор справочников одним диалогом; типы, параметры и связи — автоматически.</summary>
+    /// <summary>Режим 1: выбор справочников одним диалогом (со встроенным «Выбрать все»); типы, параметры и связи — автоматически.</summary>
     /// <param name="data">Накопитель, куда записываются выбранные справочники, типы, параметры и связи.</param>
     private void CollectSelectedReferencesModel(CollectorData data)
     {
@@ -448,10 +422,52 @@ internal sealed class ModelCollector
             return;
         }
 
+        // ИСПРАВЛЕНИЕ: в режиме выбора справочников целиком связи не выбираются вручную,
+        // поэтому автоматически собираем ВСЕ связи каждого справочника и их параметры.
+        PopulateSelectedLinks(data.Selections);
+
         data.Relations.AddRange(CollectRelations(data.Selections, false));
     }
 
-    /// <summary>Режим 3: пошаговый интерактивный выбор справочников, типов, параметров и связей.</summary>
+    /// <summary>
+    /// Автоматически наполняет <see cref="CatalogSelection.SelectedLinks"/> всеми связями
+    /// справочника и собирает параметры этих связей. Используется в режиме выбора справочников целиком.
+    /// </summary>
+    /// <param name="selections">Контексты выгружаемых справочников.</param>
+    private static void PopulateSelectedLinks(IEnumerable<CatalogSelection> selections)
+    {
+        if (selections == null) return;
+
+        foreach (CatalogSelection catalog in selections)
+        {
+            if (catalog?.Reference?.Description == null)
+            {
+                catalog.SelectedLinks = new List<ParameterGroup>();
+                catalog.SelectedLinkParameters = new List<ParameterInfo>();
+                continue;
+            }
+
+            // 1. Забираем все связи справочника через прямой API Description.GetLinks().
+            var allLinks = catalog.Reference.Description.GetLinks();
+            catalog.SelectedLinks = allLinks?.Where(link => link != null).ToList()
+                                    ?? new List<ParameterGroup>();
+
+            // 2. Для каждой связи включаем ВСЕ её параметры.
+            catalog.SelectedLinkParameters = new List<ParameterInfo>();
+            var seenParameters = new HashSet<Guid>();
+            foreach (ParameterGroup link in catalog.SelectedLinks)
+            {
+                if (link.Parameters == null) continue;
+                foreach (ParameterInfo parameter in link.Parameters)
+                {
+                    if (parameter == null || !seenParameters.Add(parameter.Guid)) continue;
+                    catalog.SelectedLinkParameters.Add(parameter);
+                }
+            }
+        }
+    }
+
+    /// <summary>Режим 2: пошаговый интерактивный выбор справочников, типов, параметров и связей.</summary>
     /// <param name="data">Накопитель, куда записывается результат ручного выбора.</param>
     private void CollectInteractiveModel(CollectorData data)
     {
@@ -823,7 +839,9 @@ internal sealed class ModelCollector
     private List<ParameterInfo> SelectConnectionParameters(ReferenceInfo reference, ParameterGroup connectionGroup, string title)
     {
         List<ParameterInfo> parameters = CollectVisibleGroupParameters(connectionGroup);
-        return ShowParameterSelectionDialog(parameters, title, "[v] Выбрать все параметры подключения", reference?.Name);
+        // Для параметров подключения флаг «выбрать все» не выводится: выбор выполняется
+        // ТОЛЬКО элементом множественного выбора из списка (selectAllKey = null).
+        return ShowParameterSelectionDialog(parameters, title, null, reference?.Name);
     }
 
     /// <summary>Блок параметров одной группы параметров для построения диалога выбора.</summary>
@@ -838,10 +856,10 @@ internal sealed class ModelCollector
     }
 
 
-    /// <summary>Строит диалог с мастер-флажком, флажками групп и отдельными параметрами.</summary>
+    /// <summary>Строит диалог с группами параметров и элементами множественного выбора из списка.</summary>
     /// <param name="parameters">Разрешённые для диалога параметры.</param>
     /// <param name="title">Заголовок диалога выбора.</param>
-    /// <param name="selectAllKey">Подпись мастер-флажка.</param>
+    /// <param name="selectAllKey">Подпись мастер-флажка; null или пустая строка — флаг не выводится.</param>
     /// <param name="mainGroupName">Имя базовой группы (совпадает с именем справочника), выводимой первой.</param>
     /// <returns>Отмеченные параметры без повторов по GUID.</returns>
     private List<ParameterInfo> ShowParameterSelectionDialog(List<ParameterInfo> parameters, string title, string selectAllKey, string mainGroupName)
@@ -853,7 +871,11 @@ internal sealed class ModelCollector
         dialog.Высота = 700;
         dialog.Ширина = 620;
         dialog.ОтобразитьПолосыПрокрутки(true, false);
-        dialog.ДобавитьФлаг(selectAllKey, false, false, false);
+
+        // Мастер-флаг выводится только если задана его подпись (для параметров подключения он не нужен).
+        bool hasSelectAll = !string.IsNullOrWhiteSpace(selectAllKey);
+        if (hasSelectAll)
+            dialog.ДобавитьФлаг(selectAllKey, false, false, false);
 
         // Базовая группа (одноимённая справочнику) всегда идёт первой, остальные — по алфавиту.
         List<ParameterGroupBlock> blocks = parameters
@@ -887,7 +909,7 @@ internal sealed class ModelCollector
 
         if (!dialog.Показать()) return selected;
 
-        bool selectAll = XmiSchemaExporterMacro.ReadFlag(dialog, selectAllKey, false);
+        bool selectAll = hasSelectAll && XmiSchemaExporterMacro.ReadFlag(dialog, selectAllKey, false);
         foreach (ParameterGroupBlock block in blocks)
         {
             if (selectAll)
@@ -1048,7 +1070,13 @@ internal sealed class ModelCollector
             foreach (ParameterGroup owner in owners)
             {
                 bool isConnection = current.ConnectionGroup != null && owner.Guid == current.ConnectionGroup.Guid;
-                foreach (ParameterGroup link in GetLinkGroups(owner))
+                // Для режима выбора справочников используем заранее собранные связи (SelectedLinks),
+                // иначе — прямое чтение групп связей владельца через GetLinks().
+                IEnumerable<ParameterGroup> linkGroups =
+                    !isConnection && current.SelectedLinks != null && current.SelectedLinks.Count > 0
+                        ? current.SelectedLinks
+                        : GetLinkGroups(owner);
+                foreach (ParameterGroup link in linkGroups)
                 {
                     if (link == null) continue;
                     ReferenceInfo targetReference = link.SlaveGroup?.ReferenceInfo;
@@ -1074,7 +1102,7 @@ internal sealed class ModelCollector
 
         if (items.Count == 0)
         {
-            // В автоматических режимах (Full / SelectedReferences) информационные диалоги не показываются.
+            // В автоматическом режиме (SelectedReferences) информационные диалоги не показываются.
             if (interactive) Inform("Связи между выбранными справочниками не найдены.");
             return new List<SelectedRelation>();
         }
@@ -1084,6 +1112,9 @@ internal sealed class ModelCollector
 
         var dialog = provider.СоздатьДиалогВвода("Шаг 4: Выберите связи между справочниками");
         dialog.ОтобразитьПолосыПрокрутки(true, false);
+        // Флаг «выбрать все связи»: при установке в выгрузку попадают все найденные связи.
+        const string selectAllLinksKey = "Выбрать все связи";
+        dialog.ДобавитьФлаг(selectAllLinksKey, false, false, false);
         var itemKeys = new Dictionary<CatalogRelationItem, string>();
 
         foreach (var group in items.GroupBy(item => item.SourceCatalog.Reference.Name)
@@ -1107,10 +1138,15 @@ internal sealed class ModelCollector
 
         var selectedItems = new List<CatalogRelationItem>();
         if (dialog.Показать())
-            selectedItems = items
-                .Where(item => itemKeys.TryGetValue(item, out var key) &&
-                               XmiSchemaExporterMacro.ReadFlag(dialog, key, false))
-                .ToList();
+        {
+            bool selectAllLinks = XmiSchemaExporterMacro.ReadFlag(dialog, selectAllLinksKey, true);
+            selectedItems = selectAllLinks
+                ? items.ToList()
+                : items
+                    .Where(item => itemKeys.TryGetValue(item, out var key) &&
+                                   XmiSchemaExporterMacro.ReadFlag(dialog, key, false))
+                    .ToList();
+        }
 
         return DeduplicateRelations(selectedItems);
     }
@@ -1195,7 +1231,7 @@ internal sealed class ModelCollector
     }
 
 
-    /// <summary>Строит ассоциации для связей, выбранных пользователем или режимом полной выгрузки.</summary>
+    /// <summary>Строит ассоциации для связей, выбранных пользователем или автоматическим режимом.</summary>
     /// <param name="relations">Выбранные связи.</param>
     /// <param name="classesByReferenceGuid">Классы, сгруппированные по GUID справочника.</param>
     /// <param name="allAssocs">Общий список ассоциаций для UML и EA Extension.</param>
@@ -1405,8 +1441,15 @@ internal sealed class ModelCollector
         if (classModel.IsConnection) return true;
 
         ClassObject classObject = classModel.SourceClass;
-        return classObject?.ParameterGroups != null &&
-               classObject.ParameterGroups.Any(group => group != null && group.Guid == linkGroup.Guid);
+        if (classObject == null) return false;
+
+        // Связь привязана к типу, если совпадает с одной из групп его параметров
+        // либо присутствует среди групп связей, возвращаемых прямым API GetLinks() этого типа.
+        if (classObject.ParameterGroups != null &&
+            classObject.ParameterGroups.Any(group => group != null && group.Guid == linkGroup.Guid))
+            return true;
+
+        return GetLinkGroups(classObject).Any(link => link != null && link.Guid == linkGroup.Guid);
     }
 
     /// <summary>Проверяет допустимость типа-приёмника через разрешённые классы самой связи.</summary>
@@ -1424,8 +1467,13 @@ internal sealed class ModelCollector
         }
         catch
         {
-            return true;
+            allowedClasses = null;
         }
+
+        // Если целевые типы не заданы явно на уровне связи, используем базовые типы
+        // ведомой группы связи (linkGroup.SlaveGroup.Classes.AllClasses).
+        if (allowedClasses == null || allowedClasses.Count == 0)
+            allowedClasses = linkGroup.SlaveGroup?.Classes?.AllClasses;
         if (allowedClasses == null || allowedClasses.Count == 0) return true;
 
         ClassObject slaveClass = slaveClassModel.SourceClass;
@@ -2304,6 +2352,9 @@ internal sealed class XmiDocumentWriter
                         new XAttribute("ea_eleType", "element")));
                 // Обязательный тэг GUID события DOCs (ParameterGroupEvent).
                 AddTags(signalElement, eventModel.Guid, eventModel.DocsGuid);
+                // Гарантированная простановка стереотипа «event» для события в секции xmi:Extension
+                // (в дополнение к properties/@stereotype="event").
+                signalElement.Add(CreateEventStereotype(eventModel.Guid));
                 elements.Add(signalElement);
             }
         }
@@ -2422,6 +2473,18 @@ internal sealed class XmiDocumentWriter
             new XAttribute("name", "T-FLEX DOCs GUID"),
             new XAttribute("value", entityGuid.ToString()),
             new XAttribute("modelElement", modelElement));
+    }
+
+    /// <summary>Формирует EA-элемент стереотипа «event» для события DOCs.</summary>
+    /// <param name="elementXmiId">XMI ID элемента события.</param>
+    /// <returns>XML-элемент stereotype с именем «event».</returns>
+    private static XElement CreateEventStereotype(string elementXmiId)
+    {
+        return new XElement("stereotype",
+            new XAttribute(xmi + "id", XmiSupport.FormatEaId(
+                XmiSupport.CreateDeterministicGuid($"Stereo_event_{elementXmiId}"))),
+            new XAttribute("name", "event"),
+            new XAttribute("modelElement", elementXmiId));
     }
 
 
