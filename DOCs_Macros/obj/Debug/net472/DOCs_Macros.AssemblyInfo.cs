@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("DOCs_Macros")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+627e397ffaff347ce43a7557330bbe2ed6b454a4")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+0114f9c34840077d3d6cd69104360feadbf12609")]
 [assembly: System.Reflection.AssemblyProductAttribute("DOCs_Macros")]
 [assembly: System.Reflection.AssemblyTitleAttribute("DOCs_Macros")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

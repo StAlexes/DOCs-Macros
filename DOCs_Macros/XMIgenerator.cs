@@ -12,6 +12,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
@@ -32,11 +33,21 @@ public enum ExportMode
     SelectedTypes
 }
 
+/// <summary>Формат результирующей диаграммы/файла.</summary>
+public enum ExportFormat
+{
+    Xmi21,
+    DrawIo
+}
+
 /// <summary>Параметры выгрузки, собираемые в стартовом диалоге макроса.</summary>
 public sealed class ExportOptions
 {
     /// <summary>Выбранный режим выгрузки.</summary>
     public ExportMode Mode { get; set; } = ExportMode.SelectedTypes;
+
+    /// <summary>Формат результирующей выгрузки.</summary>
+    public ExportFormat Format { get; set; } = ExportFormat.DrawIo;
 
     /// <summary>Флаг выгрузки комментариев (ownedComment/documentation).</summary>
     public bool ExportComments { get; set; } = true;
@@ -247,6 +258,9 @@ public class XmiSchemaExporterMacro : MacroProvider
     internal const string ModeField = "Режим выгрузки";
     internal const string ModeOptionRefs = "1. Выгрузка указанных справочников";
     internal const string ModeOptionTypes = "2. Выгрузка указанных типов";
+    internal const string FormatField = "Формат экспорта";
+    internal const string DrawIoFormatText = "draw.io Diagram (*.drawio)";
+    internal const string XmiFormatText = "XMI 2.1 (*.xmi)";
     // Заголовок группы ОБЯЗАН отличаться от ModeField: поиск элемента в диалоге идёт по имени
     // и возвращает первый совпавший, поэтому одноимённая группа перекрывает поле выбора режима.
     internal const string ModeGroupCaption = "Выбор режима";
@@ -264,6 +278,12 @@ public class XmiSchemaExporterMacro : MacroProvider
         ExportModel model = collector.CollectData();
         if (model == null) return;
 
+        if (options.Format == ExportFormat.DrawIo)
+        {
+            DrawIoDocumentWriter.Write(this, model);
+            return;
+        }
+
         var writer = new XmiDocumentWriter(this, model);
         writer.WriteToFile();
     }
@@ -274,9 +294,9 @@ public class XmiSchemaExporterMacro : MacroProvider
     /// <returns>Заполненные параметры либо null, если пользователь отменил ввод.</returns>
     private ExportOptions ShowStartupDialog()
     {
-        var dialog = СоздатьДиалогВвода("Экспорт схемы T-FLEX DOCs в XMI");
+        var dialog = СоздатьДиалогВвода("Экспорт схемы T-FLEX DOCs");
         dialog.Ширина = 540;
-        dialog.Высота = 340;
+        dialog.Высота = 380;
 
         dialog.ДобавитьГруппу(ModeGroupCaption);
         // ВАЖНО: перегрузка без значения по умолчанию оставляет поле пустым (GetValue вернёт null),
@@ -285,6 +305,13 @@ public class XmiSchemaExporterMacro : MacroProvider
         {
             ModeOptionRefs,
             ModeOptionTypes
+        });
+
+        dialog.ДобавитьГруппу("Формат");
+        dialog.ДобавитьВыборИзСписка(FormatField, DrawIoFormatText, true, new object[]
+        {
+            DrawIoFormatText,
+            XmiFormatText
         });
 
         dialog.ДобавитьГруппу("Настройки");
@@ -297,6 +324,7 @@ public class XmiSchemaExporterMacro : MacroProvider
         return new ExportOptions
         {
             Mode = ParseMode(dialog[ModeField]),
+            Format = ParseFormat(dialog[FormatField]),
             ExportComments = ReadFlag(dialog, CommentsKey, true),
             ExportEvents = ReadFlag(dialog, EventsKey, false),
             ExportSettings = ReadFlag(dialog, SettingsKey, true)
@@ -325,6 +353,26 @@ public class XmiSchemaExporterMacro : MacroProvider
 
         // Пустое значение трактуем как предустановленный (первый) пункт списка — выбор справочников.
         return ExportMode.SelectedReferences;
+    }
+
+    /// <summary>Сопоставляет выбранный формат экспорта с перечислением форматов.</summary>
+    private static ExportFormat ParseFormat(object value)
+    {
+        string text = Convert.ToString(value)?.Trim() ?? string.Empty;
+
+        if (string.Equals(text, XmiFormatText, StringComparison.OrdinalIgnoreCase)) return ExportFormat.Xmi21;
+        if (string.Equals(text, DrawIoFormatText, StringComparison.OrdinalIgnoreCase)) return ExportFormat.DrawIo;
+
+        if (int.TryParse(text, out int index))
+        {
+            switch (index)
+            {
+                case 0: return ExportFormat.DrawIo;
+                case 1: return ExportFormat.Xmi21;
+            }
+        }
+
+        return ExportFormat.DrawIo;
     }
 
     /// <summary>Считывает значение флажка из диалога ввода с безопасным значением по умолчанию.</summary>
@@ -1930,6 +1978,161 @@ internal static class XmiSupport
     }
 }
 
+/// <summary>Генерирует диаграмму draw.io на основе подготовленной модели экспорта DOCs.</summary>
+public static class DrawIoDocumentWriter
+{
+    /// <summary>Запрашивает путь и сохраняет диаграмму в формате draw.io.</summary>
+    public static void Write(MacroProvider provider, ExportModel model)
+    {
+        var saveDialog = provider.СоздатьДиалогСохраненияФайла("Сохранение файла draw.io");
+        saveDialog.Заголовок = "Сохранение файла draw.io";
+        saveDialog.Фильтр = "Файлы draw.io (*.drawio)|*.drawio";
+        saveDialog.РасширениеПоУмолчанию = "drawio";
+        if (!saveDialog.Показать()) return;
+
+        Write(saveDialog.ИмяФайла, model);
+    }
+
+    /// <summary>Сохраняет готовую модель в файл draw.io XML.</summary>
+    public static void Write(string filePath, ExportModel model)
+    {
+        var settings = new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = true };
+        using (var writer = XmlWriter.Create(filePath, settings))
+        {
+            writer.WriteStartDocument();
+            writer.WriteStartElement("mxfile");
+            writer.WriteAttributeString("host", "Electron");
+            writer.WriteAttributeString("type", "device");
+
+            writer.WriteStartElement("diagram");
+            writer.WriteAttributeString("id", "Diagram_TFLEX_Docs");
+            writer.WriteAttributeString("name", "Схема T-FLEX DOCs");
+
+            writer.WriteStartElement("mxGraphModel");
+            writer.WriteAttributeString("dx", "1200");
+            writer.WriteAttributeString("dy", "800");
+            writer.WriteAttributeString("grid", "1");
+            writer.WriteAttributeString("gridSize", "10");
+
+            writer.WriteStartElement("root");
+
+            writer.WriteStartElement("mxCell");
+            writer.WriteAttributeString("id", "0");
+            writer.WriteEndElement();
+
+            writer.WriteStartElement("mxCell");
+            writer.WriteAttributeString("id", "1");
+            writer.WriteAttributeString("parent", "0");
+            writer.WriteEndElement();
+
+            int index = 0;
+            const int colCount = 4;
+            const int stepX = 280;
+            const int stepY = 220;
+            const int startX = 40;
+            const int startY = 40;
+
+            var classCellMap = new Dictionary<string, string>();
+            var classes = model?.Classes ?? new List<ClassModel>();
+            foreach (var classModel in classes)
+            {
+                if (classModel == null) continue;
+                string cellId = "cls_" + (classModel.Guid ?? string.Empty);
+                classCellMap[classModel.Guid ?? string.Empty] = cellId;
+
+                int x = startX + (index % colCount) * stepX;
+                int y = startY + (index / colCount) * stepY;
+                index++;
+
+                writer.WriteStartElement("mxCell");
+                writer.WriteAttributeString("id", cellId);
+                writer.WriteAttributeString("value", BuildClassValue(classModel));
+                writer.WriteAttributeString("style", "swimlane;fontStyle=1;align=center;verticalAlign=top;childLayout=stackLayout;horizontal=1;startSize=26;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;");
+                writer.WriteAttributeString("vertex", "1");
+                writer.WriteAttributeString("parent", "1");
+
+                writer.WriteStartElement("mxGeometry");
+                writer.WriteAttributeString("x", x.ToString());
+                writer.WriteAttributeString("y", y.ToString());
+                writer.WriteAttributeString("width", "220");
+                writer.WriteAttributeString("height", "140");
+                writer.WriteAttributeString("as", "geometry");
+                writer.WriteEndElement();
+
+                writer.WriteEndElement();
+            }
+
+            foreach (var assoc in model?.Assocs ?? new List<AssocModel>())
+            {
+                if (assoc == null) continue;
+                if (!classCellMap.TryGetValue(assoc.SourceClassGuid ?? string.Empty, out var sourceId)) continue;
+                if (!classCellMap.TryGetValue(assoc.TargetClassGuid ?? string.Empty, out var targetId)) continue;
+
+                string edgeValue = BuildEdgeValue(assoc);
+                string edgeId = "edge_" + (assoc.AssocGuid ?? Guid.Empty.ToString("N"));
+
+                writer.WriteStartElement("mxCell");
+                writer.WriteAttributeString("id", edgeId);
+                writer.WriteAttributeString("value", edgeValue);
+                writer.WriteAttributeString("style", "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=0;strokeColor=#0052CC;");
+                writer.WriteAttributeString("source", sourceId);
+                writer.WriteAttributeString("target", targetId);
+                writer.WriteAttributeString("edge", "1");
+                writer.WriteAttributeString("parent", "1");
+
+                writer.WriteStartElement("mxGeometry");
+                writer.WriteAttributeString("relative", "1");
+                writer.WriteAttributeString("as", "geometry");
+                writer.WriteEndElement();
+
+                writer.WriteEndElement();
+            }
+
+            writer.WriteEndElement();
+            writer.WriteEndElement();
+            writer.WriteEndElement();
+            writer.WriteEndElement();
+            writer.WriteEndDocument();
+        }
+    }
+
+    private static string BuildClassValue(ClassModel classModel)
+    {
+        if (classModel == null) return string.Empty;
+
+        var builder = new StringBuilder();
+        builder.Append("<b>").Append(SecurityElement.Escape(classModel.Name ?? "(без имени)")).Append("</b><hr/>");
+
+        if (classModel.Parameters != null)
+        {
+            foreach (var parameter in classModel.Parameters)
+            {
+                if (parameter == null || string.IsNullOrWhiteSpace(parameter.Name)) continue;
+                builder.Append("+ ").Append(SecurityElement.Escape(parameter.Name)).Append("<br/>");
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static string BuildEdgeValue(AssocModel assoc)
+    {
+        if (assoc == null) return string.Empty;
+
+        string sourceRole = string.IsNullOrWhiteSpace(assoc.SourceRole) ? "" : assoc.SourceRole;
+        string targetRole = string.IsNullOrWhiteSpace(assoc.TargetRole) ? "" : assoc.TargetRole;
+
+        string multiplicity = string.IsNullOrWhiteSpace(assoc.SourceLower) || string.IsNullOrWhiteSpace(assoc.SourceUpper)
+            ? "0..* -> 0..*"
+            : $"{assoc.SourceLower}..{assoc.SourceUpper} -> {assoc.TargetLower}..{assoc.TargetUpper}";
+
+        if (string.IsNullOrWhiteSpace(sourceRole) && string.IsNullOrWhiteSpace(targetRole))
+            return multiplicity;
+
+        return string.Concat(sourceRole, " ", multiplicity, " ", targetRole).Trim();
+    }
+}
+
 
 /// <summary>
 /// Формирует и сохраняет XMI 2.1 с профилем и метаданными, совместимыми с Enterprise Architect.
@@ -1959,11 +2162,23 @@ internal sealed class XmiDocumentWriter
     /// <summary>Запрашивает файл и сохраняет в него XMI-представление модели.</summary>
     public void WriteToFile()
     {
-        ДиалогСохраненияФайла saveDialog = provider.СоздатьДиалогСохраненияФайла("Сохранение файла XMI");
-        saveDialog.Заголовок = "Сохранение файла XMI";
-        saveDialog.Фильтр = "Файлы XML (*.xml)|*.xml";
-        saveDialog.РасширениеПоУмолчанию = "xml";
+        string filter = options.Format == ExportFormat.DrawIo
+            ? "Файлы draw.io (*.drawio)|*.drawio"
+            : "Файлы XMI (*.xmi)|*.xmi";
+        string defaultExtension = options.Format == ExportFormat.DrawIo ? "drawio" : "xmi";
+
+        ДиалогСохраненияФайла saveDialog = provider.СоздатьДиалогСохраненияФайла(options.Format == ExportFormat.DrawIo ? "Сохранение файла draw.io" : "Сохранение файла XMI");
+        saveDialog.Заголовок = options.Format == ExportFormat.DrawIo ? "Сохранение файла draw.io" : "Сохранение файла XMI";
+        saveDialog.Фильтр = filter;
+        saveDialog.РасширениеПоУмолчанию = defaultExtension;
         if (!saveDialog.Показать()) return;
+
+        if (options.Format == ExportFormat.DrawIo)
+        {
+            DrawIoDocumentWriter.Write(saveDialog.ИмяФайла, model);
+            provider.Сообщение("Завершение", $"Схема успешно сохранена:\n{saveDialog.ИмяФайла}");
+            return;
+        }
 
         XDocument document = BuildDocument();
         var writerSettings = new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = true };
