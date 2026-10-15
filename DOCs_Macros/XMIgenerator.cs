@@ -4,11 +4,15 @@
 // Архитектура макроса:
 //   XmiSchemaExporterMacro  — точка входа (MacroProvider): стартовый диалог и оркестрация.
 //   ModelCollector          — сбор модели DOCs (2 режима выгрузки, прямой вызов API).
+//   DrawIoDocumentWriter    — генерация диаграммы draw.io (mxGraph XML) из той же модели.
 //   XmiDocumentWriter       — изоляция генерации готового XMI 2.1 / Enterprise Architect.
 //
 // Вся работа с моделью данных T-FLEX DOCs выполняется ТОЛЬКО через прямые свойства API
 // (ReferenceCatalog.GetReferences, ReferenceInfo.Classes.AllClasses, ClassObject.ParameterGroups,
-// ParameterInfo.Type.IsInt и т.д.). Универсальные методы-обёртки рефлексии удалены.
+// ParameterInfo.Type.IsInt и т.д.)
+//
+// Оба экспортёра работают по одной модели ExportModel, поэтому состав данных (включая настройки
+// структуры AddStructureSettings и кратности ассоциаций) в XMI и draw.io совпадает.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -175,6 +179,8 @@ public sealed class CatalogModel
     public string Name { get; set; }
     /// <summary>Комментарий справочника.</summary>
     public string Comment { get; set; }
+    /// <summary>Тип иерархии справочника DOCs (None, Simple, Complex).</summary>
+    public string Hierarchy { get; set; } = "None";
     /// <summary>Пользовательские настройки структуры для tagged values.</summary>
     public List<KeyValuePair<string, string>> Settings { get; set; } = new List<KeyValuePair<string, string>>();
     /// <summary>События (UML Signal) справочника.</summary>
@@ -1361,7 +1367,8 @@ internal sealed class ModelCollector
                 : XmiSupport.CreateDeterministicGuid($"Catalog_{reference.Name}")),
             DocsGuid = reference.Guid,
             Name = reference.Name,
-            Comment = reference.Description?.Comment
+            Comment = reference.Description?.Comment,
+            Hierarchy = Convert.ToString(reference.HierarchyType)
         };
 
         if (options.ExportSettings)
@@ -1946,7 +1953,7 @@ internal static class XmiSupport
         return ("EAC__string", "string");
     }
 
-    /// <summary>Форматирует нижнюю и верхнюю границы кратности для EA-коннектора.</summary>
+    /// <summary>Форматирует значение кратности для XMI/EA.</summary>
     /// <param name="lower">Нижняя граница кратности.</param>
     /// <param name="upper">Верхняя граница или -1/* для неограниченной кратности.</param>
     /// <returns>Значение кратности в формате EA.</returns>
@@ -1978,9 +1985,49 @@ internal static class XmiSupport
     }
 }
 
-/// <summary>Генерирует диаграмму draw.io на основе подготовленной модели экспорта DOCs.</summary>
+/// <summary>
+/// Генерирует диаграмму draw.io на основе подготовленной модели экспорта DOCs.
+/// Справочники рисуются контейнерами <c>&lt;&lt;catalog&gt;&gt;</c>, их типы объектов — вложенными
+/// карточками <c>&lt;&lt;type&gt;&gt;</c>; связи выводятся в ER-нотации Crow's Foot.
+/// Кратности на концах рёбер берутся из кратностей ассоциаций модели, поэтому сложная
+/// иерархия справочника (несколько родителей у типа) и простое дерево рисуются по-разному.
+/// </summary>
 public static class DrawIoDocumentWriter
 {
+    /// <summary>Общие параметры рёбер в ER-нотации; маркеры кратностей задаются отдельно для каждого конца.</summary>
+    private const string EdgeStyleBase = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;curved=1;";
+
+    /// <summary>Собирает стиль ребра ER-нотации с маркерами кратности на требуемых концах.</summary>
+    /// <param name="strokeColor">Цвет линии ребра.</param>
+    /// <param name="startArrow">Маркер со стороны источника либо null, если маркер не нужен.</param>
+    /// <param name="endArrow">Маркер со стороны цели либо null, если маркер не нужен.</param>
+    /// <returns>Значение атрибута style ячейки ребра.</returns>
+    private static string BuildEdgeStyle(string strokeColor, string startArrow, string endArrow)
+    {
+        var builder = new StringBuilder(EdgeStyleBase);
+        if (!string.IsNullOrWhiteSpace(startArrow))
+            builder.Append("startArrow=").Append(startArrow).Append(";startFill=0;");
+        if (!string.IsNullOrWhiteSpace(endArrow))
+            builder.Append("endArrow=").Append(endArrow).Append(";endFill=0;");
+        builder.Append("strokeColor=").Append(strokeColor).Append(';');
+        return builder.ToString();
+    }
+
+    /// <summary>Переводит кратности конца ассоциации в маркер ER-нотации draw.io.</summary>
+    /// <param name="lower">Нижняя граница кратности.</param>
+    /// <param name="upper">Верхняя граница кратности либо * / -1 для неограниченной кратности.</param>
+    /// <returns>Имя маркера draw.io: ERzeroToOne, ERone, ERzeroToMany либо ERoneToMany.</returns>
+    private static string BuildErArrow(string lower, string upper)
+    {
+        string normalizedLower = string.IsNullOrWhiteSpace(lower) ? "0" : lower.Trim();
+        string normalizedUpper = string.IsNullOrWhiteSpace(upper) ? "1" : upper.Trim();
+        if (normalizedUpper == "-1") normalizedUpper = "*";
+
+        if (normalizedUpper == "*")
+            return normalizedLower == "1" ? "ERoneToMany" : "ERzeroToMany";
+        return normalizedLower == "0" ? "ERzeroToOne" : "ERone";
+    }
+
     /// <summary>Запрашивает путь и сохраняет диаграмму в формате draw.io.</summary>
     public static void Write(MacroProvider provider, ExportModel model)
     {
@@ -1994,8 +2041,11 @@ public static class DrawIoDocumentWriter
     }
 
     /// <summary>Сохраняет готовую модель в файл draw.io XML.</summary>
+    /// <param name="filePath">Путь к создаваемому файлу .drawio.</param>
+    /// <param name="model">Подготовленная модель экспорта; настройки структуры выгружаются, если разрешено <see cref="ExportOptions.ExportSettings"/>.</param>
     public static void Write(string filePath, ExportModel model)
     {
+        bool exportSettings = model?.Options?.ExportSettings ?? true;
         var settings = new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = true };
         using (var writer = XmlWriter.Create(filePath, settings))
         {
@@ -2009,8 +2059,8 @@ public static class DrawIoDocumentWriter
             writer.WriteAttributeString("name", "Схема T-FLEX DOCs");
 
             writer.WriteStartElement("mxGraphModel");
-            writer.WriteAttributeString("dx", "1200");
-            writer.WriteAttributeString("dy", "800");
+            writer.WriteAttributeString("dx", "1400");
+            writer.WriteAttributeString("dy", "900");
             writer.WriteAttributeString("grid", "1");
             writer.WriteAttributeString("gridSize", "10");
 
@@ -2025,58 +2075,144 @@ public static class DrawIoDocumentWriter
             writer.WriteAttributeString("parent", "0");
             writer.WriteEndElement();
 
-            int index = 0;
-            const int colCount = 4;
-            const int stepX = 280;
-            const int stepY = 220;
-            const int startX = 40;
-            const int startY = 40;
+            var catalogCellMap = new Dictionary<string, string>(StringComparer.Ordinal);
+            var catalogRectMap = new Dictionary<string, int[]>(StringComparer.Ordinal);
+            var classCellMap = new Dictionary<string, string>(StringComparer.Ordinal);
 
-            var classCellMap = new Dictionary<string, string>();
-            var classes = model?.Classes ?? new List<ClassModel>();
-            foreach (var classModel in classes)
+            // Карточки справочников раскладываются полосами, типы — в строку под своим справочником.
+            // Ширина блока считается по числу типов, поэтому строки разных справочников не пересекаются,
+            // а увеличенные промежутки (catalogGapX/blockGapY) не дают блокам слипаться на диаграмме.
+            const int startX = 60;
+            const int startY = 60;
+            const int cardWidth = 260;
+            const int minCatalogHeight = 120;
+            const int typeHeight = 190;
+            const int catalogGapX = 160;
+            const int catalogTypeGapY = 100;
+            const int typeGapX = 80;
+            const int blockGapY = 220;
+            const int maxBandWidth = 1800;
+            const int settingLineHeight = 18;
+
+            foreach (CatalogModel catalog in model?.Catalogs ?? new List<CatalogModel>())
             {
-                if (classModel == null) continue;
-                string cellId = "cls_" + (classModel.Guid ?? string.Empty);
-                classCellMap[classModel.Guid ?? string.Empty] = cellId;
+                if (catalog == null || string.IsNullOrWhiteSpace(catalog.Guid)) continue;
 
-                int x = startX + (index % colCount) * stepX;
-                int y = startY + (index / colCount) * stepY;
-                index++;
+                int typeCount = model.Classes.Count(item => item != null &&
+                    string.Equals(item.CatalogGuid, catalog.Guid, StringComparison.Ordinal) &&
+                    !string.IsNullOrWhiteSpace(item.Guid));
+
+                string catalogCellId = "catalog_" + SafeId(catalog.Guid);
+                catalogCellMap[catalog.Guid] = catalogCellId;
+
+                int columns = Math.Max(typeCount, 1);
+                // Блок справочника занимает всю ширину своих карточек типов, иначе следующий
+                // справочник встал бы поверх них.
+                int blockWidth = columns * cardWidth + (columns - 1) * typeGapX;
+                int cardHeight = minCatalogHeight;
+                if (exportSettings && catalog.Settings != null && catalog.Settings.Count > 0)
+                {
+                    // Блок настроек удлиняет карточку, иначе он наехал бы на карточки типов.
+                    cardHeight += catalog.Settings.Count * settingLineHeight;
+                }
+
+                catalogRectMap[catalog.Guid] = new[] { 0, 0, blockWidth, cardHeight };
+            }
+
+            // Раскладываем блоки слева направо, переходя на новую полосу, когда полоса заполнена.
+            int bandTop = startY;
+            int bandHeight = 0;
+            int cursorX = startX;
+
+            foreach (CatalogModel catalog in model?.Catalogs ?? new List<CatalogModel>())
+            {
+                if (catalog == null || string.IsNullOrWhiteSpace(catalog.Guid)) continue;
+
+                int[] rect = catalogRectMap[catalog.Guid];
+                int blockWidth = rect[2];
+                int cardHeight = rect[3];
+
+                if (cursorX > startX && cursorX + blockWidth > startX + maxBandWidth)
+                {
+                    bandTop += bandHeight + blockGapY;
+                    bandHeight = 0;
+                    cursorX = startX;
+                }
+
+                rect[0] = cursorX;
+                rect[1] = bandTop;
+                cursorX += blockWidth + catalogGapX;
+                bandHeight = Math.Max(bandHeight, cardHeight + catalogTypeGapY + typeHeight);
+            }
+
+            foreach (CatalogModel catalog in model?.Catalogs ?? new List<CatalogModel>())
+            {
+                if (catalog == null || string.IsNullOrWhiteSpace(catalog.Guid)) continue;
+                if (!catalogRectMap.TryGetValue(catalog.Guid, out var rect)) continue;
 
                 writer.WriteStartElement("mxCell");
-                writer.WriteAttributeString("id", cellId);
-                writer.WriteAttributeString("value", BuildClassValue(classModel));
-                writer.WriteAttributeString("style", "swimlane;fontStyle=1;align=center;verticalAlign=top;childLayout=stackLayout;horizontal=1;startSize=26;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;");
+                writer.WriteAttributeString("id", catalogCellMap[catalog.Guid]);
+                writer.WriteAttributeString("value", BuildCatalogValue(catalog, exportSettings));
+                writer.WriteAttributeString("style", "align=left;overflow=fill;html=1;dropTarget=0;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;");
                 writer.WriteAttributeString("vertex", "1");
                 writer.WriteAttributeString("parent", "1");
 
                 writer.WriteStartElement("mxGeometry");
-                writer.WriteAttributeString("x", x.ToString());
-                writer.WriteAttributeString("y", y.ToString());
-                writer.WriteAttributeString("width", "220");
-                writer.WriteAttributeString("height", "140");
+                writer.WriteAttributeString("x", rect[0].ToString());
+                writer.WriteAttributeString("y", rect[1].ToString());
+                writer.WriteAttributeString("width", cardWidth.ToString());
+                writer.WriteAttributeString("height", rect[3].ToString());
                 writer.WriteAttributeString("as", "geometry");
                 writer.WriteEndElement();
-
                 writer.WriteEndElement();
             }
 
-            foreach (var assoc in model?.Assocs ?? new List<AssocModel>())
+            foreach (CatalogModel catalog in model?.Catalogs ?? new List<CatalogModel>())
             {
-                if (assoc == null) continue;
-                if (!classCellMap.TryGetValue(assoc.SourceClassGuid ?? string.Empty, out var sourceId)) continue;
-                if (!classCellMap.TryGetValue(assoc.TargetClassGuid ?? string.Empty, out var targetId)) continue;
+                if (catalog == null || string.IsNullOrWhiteSpace(catalog.Guid)) continue;
+                if (!catalogRectMap.TryGetValue(catalog.Guid, out var catalogRect)) continue;
 
-                string edgeValue = BuildEdgeValue(assoc);
-                string edgeId = "edge_" + (assoc.AssocGuid ?? Guid.Empty.ToString("N"));
+                int localTypeIndex = 0;
+                foreach (ClassModel classModel in model.Classes.Where(item => item != null && string.Equals(item.CatalogGuid, catalog.Guid, StringComparison.Ordinal)))
+                {
+                    if (classModel == null || string.IsNullOrWhiteSpace(classModel.Guid)) continue;
+
+                    string classCellId = "type_" + SafeId(classModel.Guid);
+                    classCellMap[classModel.Guid] = classCellId;
+
+                    writer.WriteStartElement("mxCell");
+                    writer.WriteAttributeString("id", classCellId);
+                    writer.WriteAttributeString("value", BuildClassValue(classModel));
+                    writer.WriteAttributeString("style", "verticalAlign=top;align=left;overflow=fill;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;");
+                    writer.WriteAttributeString("vertex", "1");
+                    writer.WriteAttributeString("parent", "1");
+
+                    writer.WriteStartElement("mxGeometry");
+                    writer.WriteAttributeString("x", (catalogRect[0] + localTypeIndex * (cardWidth + typeGapX)).ToString());
+                    writer.WriteAttributeString("y", (catalogRect[1] + catalogRect[3] + catalogTypeGapY).ToString());
+                    writer.WriteAttributeString("width", cardWidth.ToString());
+                    writer.WriteAttributeString("height", typeHeight.ToString());
+                    writer.WriteAttributeString("as", "geometry");
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+
+                    localTypeIndex++;
+                }
+            }
+
+            foreach (CatalogTypeAssocModel catalogTypeAssoc in model?.CatalogTypeAssocs ?? new List<CatalogTypeAssocModel>())
+            {
+                if (catalogTypeAssoc == null) continue;
+                if (!catalogCellMap.TryGetValue(catalogTypeAssoc.CatalogGuid ?? string.Empty, out var catalogCellId)) continue;
+                if (!classCellMap.TryGetValue(catalogTypeAssoc.TypeGuid ?? string.Empty, out var typeCellId)) continue;
 
                 writer.WriteStartElement("mxCell");
-                writer.WriteAttributeString("id", edgeId);
-                writer.WriteAttributeString("value", edgeValue);
-                writer.WriteAttributeString("style", "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=0;strokeColor=#0052CC;");
-                writer.WriteAttributeString("source", sourceId);
-                writer.WriteAttributeString("target", targetId);
+                writer.WriteAttributeString("id", "contains_" + SafeId(catalogTypeAssoc.Guid ?? string.Empty));
+                writer.WriteAttributeString("value", "Содержит");
+                // Стрелка направлена к типу объектов; со стороны справочника маркер не рисуется.
+                writer.WriteAttributeString("style", BuildEdgeStyle("#9673a6", null, "ERzeroToOne"));
+                writer.WriteAttributeString("source", catalogCellId);
+                writer.WriteAttributeString("target", typeCellId);
                 writer.WriteAttributeString("edge", "1");
                 writer.WriteAttributeString("parent", "1");
 
@@ -2084,7 +2220,54 @@ public static class DrawIoDocumentWriter
                 writer.WriteAttributeString("relative", "1");
                 writer.WriteAttributeString("as", "geometry");
                 writer.WriteEndElement();
+                writer.WriteEndElement();
+            }
 
+            foreach (AssocModel assoc in model?.Assocs ?? new List<AssocModel>())
+            {
+                if (assoc == null || string.IsNullOrWhiteSpace(assoc.SourceClassGuid) || string.IsNullOrWhiteSpace(assoc.TargetClassGuid)) continue;
+                if (!classCellMap.TryGetValue(assoc.SourceClassGuid, out var sourceCellId)) continue;
+                if (!classCellMap.TryGetValue(assoc.TargetClassGuid, out var targetCellId)) continue;
+
+                if (string.Equals(assoc.Name, "Состоит из", StringComparison.OrdinalIgnoreCase))
+                {
+                    writer.WriteStartElement("mxCell");
+                    writer.WriteAttributeString("id", "hierarchy_" + SafeId(assoc.AssocGuid ?? string.Empty));
+                    writer.WriteAttributeString("value", BuildHierarchyValue(assoc));
+                    // Сложная иерархия допускает несколько родителей у типа, дерево — только одного.
+                    writer.WriteAttributeString("style", BuildEdgeStyle(
+                        "#B85450",
+                        BuildErArrow(assoc.SourceLower, assoc.SourceUpper),
+                        BuildErArrow(assoc.TargetLower, assoc.TargetUpper)));
+                    writer.WriteAttributeString("source", sourceCellId);
+                    writer.WriteAttributeString("target", targetCellId);
+                    writer.WriteAttributeString("edge", "1");
+                    writer.WriteAttributeString("parent", "1");
+
+                    writer.WriteStartElement("mxGeometry");
+                    writer.WriteAttributeString("relative", "1");
+                    writer.WriteAttributeString("as", "geometry");
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    continue;
+                }
+
+                writer.WriteStartElement("mxCell");
+                writer.WriteAttributeString("id", "assoc_" + SafeId(assoc.AssocGuid ?? string.Empty));
+                writer.WriteAttributeString("value", BuildLinkValue(assoc));
+                writer.WriteAttributeString("style", BuildEdgeStyle(
+                    "#0052CC",
+                    BuildErArrow(assoc.SourceLower, assoc.SourceUpper),
+                    BuildErArrow(assoc.TargetLower, assoc.TargetUpper)));
+                writer.WriteAttributeString("source", sourceCellId);
+                writer.WriteAttributeString("target", targetCellId);
+                writer.WriteAttributeString("edge", "1");
+                writer.WriteAttributeString("parent", "1");
+
+                writer.WriteStartElement("mxGeometry");
+                writer.WriteAttributeString("relative", "1");
+                writer.WriteAttributeString("as", "geometry");
+                writer.WriteEndElement();
                 writer.WriteEndElement();
             }
 
@@ -2096,40 +2279,102 @@ public static class DrawIoDocumentWriter
         }
     }
 
+    private static string BuildCatalogValue(CatalogModel catalog, bool includeSettings)
+    {
+        if (catalog == null) return "<i>&lt;&lt;catalog&gt;&gt;</i>";
+
+        var builder = new StringBuilder();
+        builder.Append("<p style=\"margin:0px;margin-top:6px;text-align:center;\"><i>&lt;&lt;catalog&gt;&gt;</i><b></b></p>");
+        builder.Append("<p style=\"margin:0px;margin-top:6px;text-align:center;\"><b>")
+            .Append(SecurityElement.Escape(catalog.Name ?? "(без имени)"))
+            .Append("</b></p>");
+        builder.Append("<hr size=\"1\" style=\"border-style:solid;\">");
+        builder.Append("<p style=\"margin:0px;margin-left:8px;\">+ T-FLEX DOCs GUID: ")
+            .Append(SecurityElement.Escape(catalog.DocsGuid != Guid.Empty ? catalog.DocsGuid.ToString() : string.Empty))
+            .Append("<br>+ Hierarchy: ")
+            .Append(SecurityElement.Escape(string.IsNullOrWhiteSpace(catalog.Hierarchy) ? "None" : catalog.Hierarchy))
+            .Append("</p>");
+        if (includeSettings) AppendSettingsBlock(builder, catalog.Settings, "margin:0px;margin-left:8px;");
+        return builder.ToString();
+    }
+
+    /// <summary>Добавляет секцию настроек структуры справочника с тем же составом, что и в XMI.</summary>
+    /// <param name="builder">Накопитель HTML-разметки ячейки.</param>
+    /// <param name="settings">Настройки структуры, собранные <see cref="ModelCollector"/>.</param>
+    /// <param name="paragraphStyle">Значение атрибута style для абзаца настроек.</param>
+    private static void AppendSettingsBlock(StringBuilder builder, List<KeyValuePair<string, string>> settings, string paragraphStyle)
+    {
+        if (builder == null || settings == null || settings.Count == 0) return;
+
+        builder.Append("<hr size=\"1\" style=\"border-style:solid;\">");
+        builder.Append("<p style=\"").Append(paragraphStyle).Append("\">");
+        bool first = true;
+        foreach (var setting in settings)
+        {
+            if (!first) builder.Append("<br>");
+            first = false;
+            builder.Append(SecurityElement.Escape(setting.Key ?? string.Empty))
+                .Append(": ")
+                .Append(SecurityElement.Escape(setting.Value ?? string.Empty));
+        }
+        builder.Append("</p>");
+    }
+
     private static string BuildClassValue(ClassModel classModel)
     {
         if (classModel == null) return string.Empty;
 
         var builder = new StringBuilder();
-        builder.Append("<b>").Append(SecurityElement.Escape(classModel.Name ?? "(без имени)")).Append("</b><hr/>");
+        builder.Append("<p style=\"margin:0px;margin-top:4px;text-align:center;\"><i>&lt;&lt;</i><i>type</i><i>&gt;&gt;</i><br><b>")
+            .Append(SecurityElement.Escape(classModel.Name ?? "(без имени)"))
+            .Append("</b></p>");
+        builder.Append("<hr size=\"1\" style=\"border-style: solid;\">");
 
+        builder.Append("<p style=\"margin: 0px 0px 0px 4px;\">");
         if (classModel.Parameters != null)
         {
             foreach (var parameter in classModel.Parameters)
             {
-                if (parameter == null || string.IsNullOrWhiteSpace(parameter.Name)) continue;
-                builder.Append("+ ").Append(SecurityElement.Escape(parameter.Name)).Append("<br/>");
+                if (parameter == null) continue;
+                string parameterName = string.IsNullOrWhiteSpace(parameter.Name) ? "(без имени)" : parameter.Name;
+                string parameterType = string.IsNullOrWhiteSpace(parameter.EaType) ? "string" : parameter.EaType;
+                builder.Append("+ ")
+                    .Append(SecurityElement.Escape(parameterName))
+                    .Append(": ")
+                    .Append(SecurityElement.Escape(parameterType))
+                    .Append("<br>");
             }
         }
+        builder.Append("</p>");
+
+        builder.Append("<hr size=\"1\" style=\"border-style:solid;\">");
+        builder.Append("<p style=\"margin:0px;margin-left:4px;\">+ T-FLEX DOCs GUID: ")
+            .Append(SecurityElement.Escape(classModel.DocsGuid != Guid.Empty ? classModel.DocsGuid.ToString() : string.Empty))
+            .Append("</p>");
 
         return builder.ToString();
     }
 
-    private static string BuildEdgeValue(AssocModel assoc)
+    private static string BuildHierarchyValue(AssocModel assoc)
+    {
+        return SecurityElement.Escape(string.IsNullOrWhiteSpace(assoc?.Name) ? "Состоит из" : assoc.Name);
+    }
+
+    private static string BuildLinkValue(AssocModel assoc)
     {
         if (assoc == null) return string.Empty;
 
-        string sourceRole = string.IsNullOrWhiteSpace(assoc.SourceRole) ? "" : assoc.SourceRole;
-        string targetRole = string.IsNullOrWhiteSpace(assoc.TargetRole) ? "" : assoc.TargetRole;
+        string name = !string.IsNullOrWhiteSpace(assoc.Name)
+            ? assoc.Name
+            : (!string.IsNullOrWhiteSpace(assoc.SourceRole) ? assoc.SourceRole : assoc.TargetRole);
+        if (string.IsNullOrWhiteSpace(name)) name = "Связь";
+        return SecurityElement.Escape(name);
+    }
 
-        string multiplicity = string.IsNullOrWhiteSpace(assoc.SourceLower) || string.IsNullOrWhiteSpace(assoc.SourceUpper)
-            ? "0..* -> 0..*"
-            : $"{assoc.SourceLower}..{assoc.SourceUpper} -> {assoc.TargetLower}..{assoc.TargetUpper}";
-
-        if (string.IsNullOrWhiteSpace(sourceRole) && string.IsNullOrWhiteSpace(targetRole))
-            return multiplicity;
-
-        return string.Concat(sourceRole, " ", multiplicity, " ", targetRole).Trim();
+    private static string SafeId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "cell";
+        return value.Replace("-", "_").Replace("{", "_").Replace("}", "_").Replace(" ", "_");
     }
 }
 
