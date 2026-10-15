@@ -6,13 +6,17 @@
 //   ModelCollector          — сбор модели DOCs (2 режима выгрузки, прямой вызов API).
 //   DrawIoDocumentWriter    — генерация диаграммы draw.io (mxGraph XML) из той же модели.
 //   XmiDocumentWriter       — изоляция генерации готового XMI 2.1 / Enterprise Architect.
+//   Xmi11DocumentWriter     — генерация XMI 1.1 (OMG UML 1.3) для импорта в старые версии EA.
+//                             Справочники выгружаются как UML:Component (стереотип catalog),
+//                             типы — как UML:Class (стереотип type) в общем корневом пакете,
+//                             вхождение типа в справочник — связью «Содержит».
 //
 // Вся работа с моделью данных T-FLEX DOCs выполняется ТОЛЬКО через прямые свойства API
 // (ReferenceCatalog.GetReferences, ReferenceInfo.Classes.AllClasses, ClassObject.ParameterGroups,
 // ParameterInfo.Type.IsInt и т.д.)
 //
-// Оба экспортёра работают по одной модели ExportModel, поэтому состав данных (включая настройки
-// структуры AddStructureSettings и кратности ассоциаций) в XMI и draw.io совпадает.
+// Все три экспортёра работают по одной модели ExportModel, поэтому состав данных (включая настройки
+// структуры AddStructureSettings и кратности ассоциаций) в XMI 2.1, XMI 1.1 и draw.io совпадает.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -40,7 +44,13 @@ public enum ExportMode
 /// <summary>Формат результирующей диаграммы/файла.</summary>
 public enum ExportFormat
 {
+    /// <summary>XMI 2.1 с профилем Enterprise Architect (основной формат обмена).</summary>
     Xmi21,
+
+    /// <summary>XMI 1.1 (OMG UML 1.3) — формат импорта старых версий Enterprise Architect.</summary>
+    Xmi11,
+
+    /// <summary>Диаграмма draw.io (mxGraph XML).</summary>
     DrawIo
 }
 
@@ -56,7 +66,7 @@ public sealed class ExportOptions
     /// <summary>Флаг выгрузки комментариев (ownedComment/documentation).</summary>
     public bool ExportComments { get; set; } = true;
 
-    /// <summary>Флаг выгрузки событий (UML Signal).</summary>
+    /// <summary>Флаг выгрузки событий справочника (UML:Class со стереотипом «event»).</summary>
     public bool ExportEvents { get; set; } = false;
 
     /// <summary>Флаг выгрузки опций настройки структуры (раздел tags в xmi:Extension).</summary>
@@ -183,7 +193,7 @@ public sealed class CatalogModel
     public string Hierarchy { get; set; } = "None";
     /// <summary>Пользовательские настройки структуры для tagged values.</summary>
     public List<KeyValuePair<string, string>> Settings { get; set; } = new List<KeyValuePair<string, string>>();
-    /// <summary>События (UML Signal) справочника.</summary>
+    /// <summary>События справочника; в XMI 1.1 выгружаются как UML:Class со стереотипом «event».</summary>
     public List<EventModel> Events { get; set; } = new List<EventModel>();
 }
 
@@ -267,6 +277,7 @@ public class XmiSchemaExporterMacro : MacroProvider
     internal const string FormatField = "Формат экспорта";
     internal const string DrawIoFormatText = "draw.io Diagram (*.drawio)";
     internal const string XmiFormatText = "XMI 2.1 (*.xmi)";
+    internal const string Xmi11FormatText = "XMI 1.1 (*.xmi)";
     // Заголовок группы ОБЯЗАН отличаться от ModeField: поиск элемента в диалоге идёт по имени
     // и возвращает первый совпавший, поэтому одноимённая группа перекрывает поле выбора режима.
     internal const string ModeGroupCaption = "Выбор режима";
@@ -287,6 +298,12 @@ public class XmiSchemaExporterMacro : MacroProvider
         if (options.Format == ExportFormat.DrawIo)
         {
             DrawIoDocumentWriter.Write(this, model);
+            return;
+        }
+
+        if (options.Format == ExportFormat.Xmi11)
+        {
+            Xmi11DocumentWriter.Write(this, model);
             return;
         }
 
@@ -317,7 +334,8 @@ public class XmiSchemaExporterMacro : MacroProvider
         dialog.ДобавитьВыборИзСписка(FormatField, DrawIoFormatText, true, new object[]
         {
             DrawIoFormatText,
-            XmiFormatText
+            XmiFormatText,
+            Xmi11FormatText
         });
 
         dialog.ДобавитьГруппу("Настройки");
@@ -367,6 +385,7 @@ public class XmiSchemaExporterMacro : MacroProvider
         string text = Convert.ToString(value)?.Trim() ?? string.Empty;
 
         if (string.Equals(text, XmiFormatText, StringComparison.OrdinalIgnoreCase)) return ExportFormat.Xmi21;
+        if (string.Equals(text, Xmi11FormatText, StringComparison.OrdinalIgnoreCase)) return ExportFormat.Xmi11;
         if (string.Equals(text, DrawIoFormatText, StringComparison.OrdinalIgnoreCase)) return ExportFormat.DrawIo;
 
         if (int.TryParse(text, out int index))
@@ -375,6 +394,7 @@ public class XmiSchemaExporterMacro : MacroProvider
             {
                 case 0: return ExportFormat.DrawIo;
                 case 1: return ExportFormat.Xmi21;
+                case 2: return ExportFormat.Xmi11;
             }
         }
 
@@ -1407,6 +1427,11 @@ internal sealed class ModelCollector
             IEnumerable<ParameterInfo> attachedParameters = (selection.Parameters ?? new List<ParameterInfo>())
                 .Where(parameter => IsParameterAttachedToType(parameter, classObject, reference))
                 .GroupBy(parameter => parameter.Guid)
+                .Select(grouping => grouping.First())
+                // Отбор по имени: у системных параметров DOCs встречаются разные GUID при
+                // одинаковом имени, а два одноимённых атрибута в одном классе EA отвергает
+                // как «повторяющиеся значения в индексе, ключевых полях или связях».
+                .GroupBy(parameter => parameter.Name ?? string.Empty, StringComparer.OrdinalIgnoreCase)
                 .Select(grouping => grouping.First());
 
             foreach (ParameterInfo parameter in attachedParameters)
@@ -1439,7 +1464,12 @@ internal sealed class ModelCollector
                 Comment = connectionGroup.Comment
             };
 
-            foreach (ParameterInfo parameter in selection.ConnectionParameters ?? new List<ParameterInfo>())
+            foreach (ParameterInfo parameter in (selection.ConnectionParameters ?? new List<ParameterInfo>())
+                .GroupBy(item => item.Guid)
+                .Select(grouping => grouping.First())
+                // Псевдотип подключения тоже не должен содержать одноимённых атрибутов.
+                .GroupBy(item => item.Name ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                .Select(grouping => grouping.First()))
             {
                 var (typeRef, eaType) = XmiSupport.MapType(parameter.Type);
                 connection.Parameters.Add(new ParamModel
@@ -1653,7 +1683,15 @@ internal sealed class ModelCollector
         return result;
     }
 
-    /// <summary>Добавляет события владельца в накопитель экспорта, устраняя повторы по GUID.</summary>
+    /// <summary>
+    /// Добавляет события владельца в накопитель экспорта, устраняя повторы по GUID сущности DOCs.
+    /// </summary>
+    /// <remarks>
+    /// Проверка <paramref name="seen"/> отбрасывает повторные обходы одного и того же владельца.
+    /// Идентификатор элемента модели при этом вычисляется из пары «справочник + событие»: одно
+    /// системное событие DOCs может входить в несколько справочников, и без участия GUID
+    /// справочника в ключе его xmi.id совпал бы у разных справочников.
+    /// </remarks>
     /// <param name="events">Накопитель событий экспорта.</param>
     /// <param name="seen">GUID уже обработанных событий для устранения повторов.</param>
     /// <param name="catalog">Справочник, содержащий событие.</param>
@@ -1666,15 +1704,22 @@ internal sealed class ModelCollector
         {
             if (eventObject == null) continue;
 
-            Guid guid = eventObject.Guid != Guid.Empty
+            // GUID сущности DOCs: у системных событий («Сохранение объекта», «Взятие на
+            // редактирование») он одинаков во всех справочниках, поэтому служит только тегом
+            // T-FLEX DOCs GUID и ключом устранения повторов внутри одного справочника.
+            Guid docsGuid = eventObject.Guid != Guid.Empty
                 ? eventObject.Guid
                 : XmiSupport.CreateDeterministicGuid($"Event_{catalog.Guid}_{eventObject.Name}");
-            if (!seen.Add(guid)) continue;
+            if (!seen.Add(docsGuid)) continue;
 
             events.Add(new EventModel
             {
-                Guid = XmiSupport.FormatEaId(guid),
-                DocsGuid = guid,
+                // xmi.id события считается по паре «справочник + событие»: иначе одно и то же
+                // системное событие даёт совпадающие xmi.id у разных справочников и EA падает
+                // на импорте с ошибкой повторяющихся значений в индексе.
+                Guid = XmiSupport.FormatEaId(
+                    XmiSupport.CreateDeterministicGuid($"Event_{catalog.Guid}_{docsGuid}")),
+                DocsGuid = docsGuid,
                 Name = eventObject.Name,
                 Comment = null,
                 CatalogGuid = catalog.Guid
@@ -2210,7 +2255,7 @@ public static class DrawIoDocumentWriter
                 writer.WriteAttributeString("id", "contains_" + SafeId(catalogTypeAssoc.Guid ?? string.Empty));
                 writer.WriteAttributeString("value", "Содержит");
                 // Стрелка направлена к типу объектов; со стороны справочника маркер не рисуется.
-                writer.WriteAttributeString("style", BuildEdgeStyle("#9673a6", null, "ERzeroToOne"));
+                writer.WriteAttributeString("style", BuildEdgeStyle("#9673a6", null, "block"));
                 writer.WriteAttributeString("source", catalogCellId);
                 writer.WriteAttributeString("target", typeCellId);
                 writer.WriteAttributeString("edge", "1");
@@ -2360,13 +2405,35 @@ public static class DrawIoDocumentWriter
         return SecurityElement.Escape(string.IsNullOrWhiteSpace(assoc?.Name) ? "Состоит из" : assoc.Name);
     }
 
+    /// <summary>
+    /// Формирует HTML-безопасную подпись связи для диаграммы draw.io.
+    /// Если у межсправочной связи заданы наименования с обеих сторон
+    /// (<see cref="AssocModel.SourceRole"/> и <see cref="AssocModel.TargetRole"/>),
+    /// выводит оба наименования в формате «Наименование А &lt;--&gt; Наименование Б».
+    /// Иначе используется общее имя ассоциации <see cref="AssocModel.Name"/> либо единственная заданная роль.
+    /// </summary>
+    /// <param name="assoc">Модель ассоциации между типами.</param>
+    /// <returns>Экранированная строка подписи ребра draw.io.</returns>
     private static string BuildLinkValue(AssocModel assoc)
     {
         if (assoc == null) return string.Empty;
 
-        string name = !string.IsNullOrWhiteSpace(assoc.Name)
-            ? assoc.Name
-            : (!string.IsNullOrWhiteSpace(assoc.SourceRole) ? assoc.SourceRole : assoc.TargetRole);
+        string name;
+        // Если связь имеет наименования с обеих сторон (со стороны обоих справочников),
+        // выводим двустороннюю подпись вида «Наименование А <--> Наименование Б».
+        // Для односторонних связей (например, «Родительский объект» / «Дочерний объект»
+        // у подключения) сохраняется прежний выбор: Name -> SourceRole -> TargetRole.
+        if (!string.IsNullOrWhiteSpace(assoc.SourceRole) && !string.IsNullOrWhiteSpace(assoc.TargetRole))
+        {
+            name = $"{assoc.SourceRole.Trim()} <--> {assoc.TargetRole.Trim()}";
+        }
+        else
+        {
+            name = !string.IsNullOrWhiteSpace(assoc.Name)
+                ? assoc.Name
+                : (!string.IsNullOrWhiteSpace(assoc.SourceRole) ? assoc.SourceRole : assoc.TargetRole);
+        }
+
         if (string.IsNullOrWhiteSpace(name)) name = "Связь";
         return SecurityElement.Escape(name);
     }
@@ -2375,6 +2442,1313 @@ public static class DrawIoDocumentWriter
     {
         if (string.IsNullOrWhiteSpace(value)) return "cell";
         return value.Replace("-", "_").Replace("{", "_").Replace("}", "_").Replace(" ", "_");
+    }
+}
+
+
+/// <summary>
+/// Формирует и сохраняет XMI 1.1 (OMG UML 1.3) — формат, который понимают старые версии
+/// Enterprise Architect и большинство UML-инструментов, работающих с XMI 1.x.
+/// Работает по той же модели <see cref="ExportModel"/>, что и остальные экспортёры, поэтому состав
+/// данных (типы, параметры, кратности концов ассоциаций и настройки структуры) не расходится с XMI 2.1
+/// и draw.io. Отличия формата: вместо xmi:Extension с профилем EA здесь используются вложенные
+/// UML:Package / UML:Component / UML:Class / UML:Classifier.feature и теги UML:ModelElement.taggedValue.
+/// </summary>
+/// <remarks>
+/// Разметка рассчитана на строгую проверку UML 1.3 со стороны EA, поэтому у каждого элемента есть
+/// обязательный набор атрибутов (visibility/isSpecification/isRoot/isLeaf/isAbstract и т. п.),
+/// типы атрибутов задаются ссылками на объявленные в модели UML:DataType (eaxmiid0…eaxmiid4),
+/// а все теги одного элемента собраны в единственный UML:ModelElement.taggedValue.
+/// Справочники объявляются элементами UML:Component со стереотипом «catalog» (а не пакетами):
+/// только Classifier может быть концом ассоциации, поэтому связь «Содержит» с типом выполнима
+/// лишь для компонента. События выгружаются как UML:Class со стереотипом «event» (ea_stype = Signal),
+/// поскольку тег UML:Signal EA импортирует без записи в t_stereotypes.
+/// Все компоненты, классы и ассоциации лежат в одном корневом пакете
+/// <c>EAPK_ROOT_DOCS</c> (у каждого элемента задан атрибут namespace="EAPK_ROOT_DOCS"),
+/// а у каждого стереотипа есть блок UML:ModelElement.stereotype —
+/// без него EA падает на t_stereotypes.AppliesTo.
+/// Разбор выгрузки самим EA (файл XMI 1.1, сохранённый из EA) показал ещё четыре правила, которые
+/// здесь соблюдены, иначе импорт падает или теряет данные:
+/// 1) у элемента допускается ровно один xmi.id на всю модель — иначе СУБД отвечает ошибкой
+///    «повторяющиеся значения в индексе, ключевых полях или связях» (поэтому события выводятся
+///    один раз, см. WriteEvents);
+/// 2) вхождение элемента в пакет EA определяет по тегам package / package_name / owner,
+///    а не по вложенности Namespace.ownedElement (поэтому эти теги есть у каждого элемента);
+/// 3) элемент (в том числе справочник) входит в пакет только если лежит внутри единственного
+///    вложенного Namespace.ownedElement корневого пакета; несколько таких контейнеров подряд
+///    EA «проглатывает» — остаётся лишь один, и часть элементов пропадает;
+/// 4) кратность конца ассоциации задаётся атрибутом multiplicity («0..1»), а не структурой
+///    UML:Multiplicity, а идентификаторов у концов нет вовсе.
+/// Описания (documentation) выгружаются тегом documentation у самого элемента — именно так
+/// приходят описания справочников и типов в выгрузке EA; отдельные UML:Comment для этого не нужны.
+/// </remarks>
+internal static class Xmi11DocumentWriter
+{
+    private const string Exporter = "Enterprise Architect";
+    /// <summary>Версия экспортёра, которую объявляет сам EA в XMI 1.1.</summary>
+    private const string ExporterVersion = "2.5";
+    /// <summary>Идентификатор версии формата XMI, который объявляет EA.</summary>
+    private const string ExporterId = "1554";
+    /// <summary>Строка расширений XMI: совпадает с XMI.extensions в выгрузке EA.</summary>
+    private const string EaExtender = "Enterprise Architect 2.5";
+    /// <summary>
+    /// URI пространства имён UML 1.3. Значение обязано совпадать с тем, что пишет сам EA
+    /// (omg.org/UML1.3): по нему разборщик выбирает таблицу элементов UML 1.3. Спецификация OMG
+    /// упоминает и вариант org.omg.xmi.namespace.UML, но EA его не распознаёт как свой.
+    /// </summary>
+    private const string UmlNamespace = "omg.org/UML1.3";
+    // Идентификатор самой модели: EA использует префикс MX_EAID_ и 32-значный hex
+    // (MX_EAID_7087B82CBF63C3DEBF62AC33AC91BADE). Литеральное «MX_EAID_MODEL» не проходит
+    // проверку формата идентификаторов при импорте, поэтому генерируется такой же вид.
+    private const string ModelXmiId = "MX_EAID_3A7C1B4D5E6F708192A3B4C5D6E7F809";
+    private const string GuidTag = "T-FLEX DOCs GUID";
+    private const string DocumentationTag = "documentation";
+    private const string EaTypeTag = "ea_type";
+    private const string EaStyleTag = "ea_stype";
+    /// <summary>Направление связи в терминах EA: первый конец — источник, второй — приёмник.</summary>
+    private const string EaDirection = "Source -> Destination";
+    /// <summary>Направление не задано: у равнозначных межсправочных связей стрелок нет.</summary>
+    private const string EaUnspecifiedDirection = "Unspecified";
+
+    // Корневой пакет: в него складываются все сущности выгрузки, чтобы EA получил одно дерево
+    // модели. Идентификатор задан строкой (а не EAID_…), как это делает сам EA для пакетов.
+    private const string RootPackageName = "Справочники T-FLEX DOCs";
+    private const string RootPackageId = "EAPK_4B8D2C6E9F017283A4B5C6D7E8F90123";
+
+    // Имена стереотипов профиля: справочник выгружается как UML:Component, тип — как UML:Class,
+    // событие — тоже как UML:Class, но со стереотипом event (тег UML:Signal в UML 1.3
+    // EA импортирует как неполноценный элемент, поэтому события идут через класс).
+    private const string CatalogStereotype = "catalog";
+    private const string TypeStereotype = "type";
+    private const string EventStereotype = "event";
+    private const string ComponentStyle = "Component";
+    private const string ClassStyle = "Class";
+    /// <summary>Значение ea_stype для события: EA заводит его как Signal, хотя узел — UML:Class.</summary>
+    private const string SignalStyle = "Signal";
+    private const string StereotypeTag = "stereotype";
+    /// <summary>Тег типа параметра; EA ожидает строчное имя тега.</summary>
+    private const string TypeTag = "type";
+    private const string OwnerTag = "owner";
+    private const string ContainsAssociationName = "Содержит";
+    // Тег direction описывает направление связи в терминах EA: концом-источником считается
+    // справочник, концом-приёмником — его тип.
+    private const string DirectionTag = "direction";
+
+    // --- Служебные теги EA, по которым он раскладывает элементы по дереву модели ---------------
+    // Разбор эталонной выгрузки EA (XMI11.xmi) показал, что вхождение элемента в пакет EA
+    // определяет по этим тегам, а не по вложенности Namespace.ownedElement. Без package/owner
+    // тип или событие импортируется «висящим» в корне, вне справочника.
+    /// <summary>Тег идентификатора пакета, в который EA помещает элемент.</summary>
+    private const string PackageTag = "package";
+    /// <summary>Тег отображаемого имени пакета (EA показывает его в дереве модели).</summary>
+    private const string PackageNameTag = "package_name";
+    private const string EaNTypeTag = "ea_ntype";
+    private const string VersionTag = "version";
+    private const string VersionValue = "1.0";
+    private const string IsActiveTag = "isActive";
+    private const string PhaseTag = "phase";
+    private const string PhaseValue = "1.0";
+    private const string AuthorTag = "author";
+    /// <summary>Автор элементов выгрузки: имя макроса, чтобы EA не показывал пустое поле.</summary>
+    private const string AuthorValue = "DOCs Macros";
+    private const string ComplexityTag = "complexity";
+    private const string ComplexityValue = "1";
+    private const string StatusTag = "status";
+    private const string StatusValue = "Proposed";
+    private const string GentypeTag = "gentype";
+    private const string GentypeValue = "Java";
+    private const string TaggedTag = "tagged";
+    private const string TposTag = "tpos";
+
+    // --- Оформление линий связи: значения повторяют выгрузку EA один в один ---------------------
+    // Стиль 3 = прямая линия; без этих тегов EA рисует связь стрелками с обеих сторон,
+    // потому что направление конца берётся из тега sourcestyle/deststyle, а не из isNavigable.
+    private const string StyleTag = "style";
+    private const string AssociationStyleValue = "3";
+    private const string LineModeTag = "linemode";
+    private const string LineColorTag = "linecolor";
+    private const string LineWidthTag = "linewidth";
+    private const string SeqNoTag = "seqno";
+    private const string HeadStyleTag = "headStyle";
+    private const string LineStyleTag = "lineStyle";
+    private const string ZeroValue = "0";
+    private const string EaSourceNameTag = "ea_sourceName";
+    private const string EaTargetNameTag = "ea_targetName";
+    private const string EaSourceTypeTag = "ea_sourceType";
+    private const string EaTargetTypeTag = "ea_targetType";
+    /// <summary>Имя связи на диаграмме (EA показывает его посередине линии).</summary>
+    private const string MidNameTag = "mt";
+    /// <summary>Роль конца-источника, которую EA показывает у начала линии (например, «+Связанные документы»).</summary>
+    private const string LtTag = "lt";
+    /// <summary>Роль конца-приёмника, которую EA показывает у конца линии.</summary>
+    private const string RtTag = "rt";
+    /// <summary>Кратность со стороны источника/приёмника в виде «0..*».</summary>
+    private const string LowerBoundTag = "lb";
+    private const string UpperBoundTag = "rb";
+    /// <summary>Стиль конца-источника/приёмника: именно он задаёт, где рисовать стрелку.</summary>
+    private const string SourceStyleTag = "sourcestyle";
+    private const string DestStyleTag = "deststyle";
+    private const string EaEndTag = "ea_end";
+    private const string EaEndSource = "source";
+    private const string EaEndTarget = "target";
+    /// <summary>Ненавигируемый конец (стрелка не рисуется).</summary>
+    private const string NonNavigableValue = "Owned=0;Navigable=Non-Navigable;";
+    /// <summary>Навигируемый конец — на нём EA и рисует единственную стрелку.</summary>
+    private const string NavigableValue = "Owned=0;Navigable=Navigable;";
+    /// <summary>Направление не задано: стрелки нет вовсе (так оформлена связь «Содержит»).</summary>
+    private const string UnspecifiedNavigableValue = "Owned=0;Navigable=Unspecified;";
+
+    // --- Атрибуты концов ассоциации --------------------------------------------------------------
+    // Кратность конца задаётся XML-атрибутом multiplicity. В выгрузке самого EA кратность
+    // записана строкой «0..*»/«1», а не структурой UML:Multiplicity, поэтому её можно
+    // переносить в теги lb/rb без числового преобразования.
+    private const string MultiplicityAttribute = "multiplicity";
+    /// <summary>Кратность «много»: сторона связи, на которую указывает стрелка.</summary>
+    private const string ManyMultiplicityValue = "0..*";
+    /// <summary>Кратность «ровно один».</summary>
+    private const string OneMultiplicityValue = "1";
+    /// <summary>Идентификаторы концов связи в служебных тегах EA.</summary>
+    private const string EaSourceIdTag = "ea_sourceID";
+    private const string EaTargetIdTag = "ea_targetID";
+
+    // --- Служебные элементы, которые EA ожидает увидеть в каждом файле XMI 1.1 ------------------
+    /// <summary>Корневой класс модели: EA заводит его при импорте и без него ругается на структуру.</summary>
+    private const string EaRootClassName = "EARootClass";
+    private const string EaRootClassId = "EAID_11111111_5487_4080_A7F4_41526CB0AA00";
+    /// <summary>Стиль отрисовки прямоугольного элемента (значения по умолчанию самого EA).</summary>
+    private const string ElementStyleValue =
+        "BackColor=-1;BorderColor=-1;BorderWidth=-1;FontColor=-1;" +
+        "VSwimLanes=1;HSwimLanes=1;BorderStyle=0;";
+
+    // --- Служебные теги пакета: без них EA создаёт пакет, но не связывает его с моделью ----------
+    // В выгрузке EA пакет описан этими тегами; отсутствие parent/created/modified не мешает
+    // импорту, но пакет теряет признак контролируемости и настройки CRC.
+    private const string ParentTag = "parent";
+    // У элемента модели метки времени называются date_created/date_modified, а у пакета —
+    // created/modified: EA берёт разные колонки t_object и t_package, поэтому имена совпадать
+    // не должны (иначе метки элемента остаются пустыми в свойствах).
+    private const string CreatedTag = "created";
+    private const string ModifiedTag = "modified";
+    private const string DateCreatedTag = "date_created";
+    private const string DateModifiedTag = "date_modified";
+    private const string IsControlledTag = "iscontrolled";
+    private const string IsProtectedTag = "isprotected";
+    private const string UsedTdTag = "usedtd";
+    private const string LogXmlTag = "logxml";
+    private const string PackageFlagsTag = "packageFlags";
+    private const string FalseValue = "FALSE";
+    private const string PackageFlagsValue = "CRC=0;";
+
+    // --- Служебные теги элементов: их пишет EA, и по ним он различает повторные импорты --------
+    // ea_guid позволяет EA сопоставить элемент уже имеющейся записи, а ea_localid/ea_eleType
+    // заполняют служебные столбцы t_object. Без них импорт проходит, но элементы дублируются.
+    private const string EaGuidTag = "ea_guid";
+    private const string EaLocalIdTag = "ea_localid";
+    private const string EaElementTypeTag = "ea_eleType";
+    private const string ElementElementValue = "element";
+    private const string DerivedTag = "derived";
+    private const string OrderedTag = "ordered";
+    private const string StaticTag = "static";
+    private const string CollectionTag = "collection";
+    private const string CollectionFalseValue = "false";
+    private const string PositionTag = "position";
+    /// <summary>Нижняя граница атрибута (тег lowerBound); у связи ту же роль играет тег lb.</summary>
+    private const string AttrLowerBoundTag = "lowerBound";
+    /// <summary>Верхняя граница атрибута (тег upperBound).</summary>
+    private const string AttrUpperBoundTag = "upperBound";
+    private const string UpperBoundOneValue = "1";
+    private const string StyleExTag = "styleex";
+    private const string StyleExValue = "IsLiteral=0;";
+
+    /// <summary>Разделитель при склейке нескольких описаний одного элемента в одно примечание.</summary>
+    private const string ListSeparator = "||";
+
+    // Идентификаторы базовых типов UML, к которым привязываются атрибуты через
+    // UML:StructuralFeature.type. Числа выбраны так же, как их назначает сам EA,
+    // чтобы повторный импорт не создавал дубликаты типов данных.
+    private const string StringDataTypeId = "eaxmiid0";
+    private const string DoubleDataTypeId = "eaxmiid1";
+    private const string BooleanDataTypeId = "eaxmiid2";
+    private const string IntegerDataTypeId = "eaxmiid3";
+    private const string DateTimeDataTypeId = "eaxmiid4";
+
+    /// <summary>Описание одного базового типа UML: xmi.id и отображаемое имя.</summary>
+    private struct DataTypeDefinition
+    {
+        public string Id;
+        public string Name;
+    }
+
+    /// <summary>Базовые типы, публикуемые в модели для привязки типов атрибутов.</summary>
+    private static readonly DataTypeDefinition[] DataTypes =
+    {
+        new DataTypeDefinition { Id = StringDataTypeId, Name = "string" },
+        new DataTypeDefinition { Id = DoubleDataTypeId, Name = "double" },
+        new DataTypeDefinition { Id = BooleanDataTypeId, Name = "boolean" },
+        new DataTypeDefinition { Id = IntegerDataTypeId, Name = "int" },
+        new DataTypeDefinition { Id = DateTimeDataTypeId, Name = "DateTime" }
+    };
+
+    // --- Состояние одной выгрузки ---------------------------------------------------------------
+    // Все элементы пакета записываются плоским списком (EA строит дерево модели по тегам),
+    // поэтому положение элемента в списке и окружение его справочника запоминаются в статике
+    // на время вызова Write.
+
+    /// <summary>Порядковый номер очередного элемента пакета (значение тега tpos).</summary>
+    private static int elementIndex;
+
+    /// <summary>
+    /// Метка времени выгрузки. Записывается и в атрибут timestamp корневого элемента, и в теги
+    /// created/modified элементов, поэтому вычисляется один раз на выгрузку, а не для каждого тега.
+    /// </summary>
+    private static string ExportTimestamp;
+
+    /// <summary>Запрашивает файл и сохраняет в него XMI 1.1.</summary>
+    /// <param name="provider">Экземпляр макроса для показа диалога сохранения файла.</param>
+    /// <param name="model">Готовая UML/EA-модель выгрузки.</param>
+    public static void Write(MacroProvider provider, ExportModel model)
+    {
+        var saveDialog = provider.СоздатьДиалогСохраненияФайла("Сохранение файла XMI 1.1");
+        saveDialog.Заголовок = "Сохранение файла XMI 1.1";
+        saveDialog.Фильтр = "Файлы XMI (*.xmi)|*.xmi";
+        saveDialog.РасширениеПоУмолчанию = "xmi";
+        if (!saveDialog.Показать()) return;
+
+        Write(saveDialog.ИмяФайла, model);
+        provider.Сообщение("Завершение", $"Схема успешно сохранена:\n{saveDialog.ИмяФайла}");
+    }
+
+    /// <summary>Сохраняет готовую модель в файл XMI 1.1 (OMG UML 1.3).</summary>
+    /// <param name="filePath">Путь к создаваемому файлу .xmi.</param>
+    /// <param name="model">Готовая UML/EA-модель выгрузки.</param>
+    public static void Write(string filePath, ExportModel model)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || model == null) return;
+
+        bool exportComments = model.Options?.ExportComments ?? true;
+        bool exportEvents = model.Options?.ExportEvents ?? false;
+        bool exportSettings = model.Options?.ExportSettings ?? true;
+
+        // Кодировка без BOM — как в остальных экспортёрах макроса, чтобы EA не спотыкался о префикс.
+        var settings = new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = true };
+        using (XmlWriter writer = XmlWriter.Create(filePath, settings))
+        {
+            writer.WriteStartDocument();
+            writer.WriteStartElement("XMI");
+            writer.WriteAttributeString("xmi.version", "1.1");
+            // Префиксное объявление пространства имён задаётся через overload с prefix/localName:
+            // XmlWriter не принимает строку "xmlns:UML" как обычное имя атрибута.
+            writer.WriteAttributeString("xmlns", "UML", null, UmlNamespace);
+            // Метка времени выгрузки: EA показывает её в свойствах модели. Значение хранится в
+            // поле, чтобы теги created/modified элементов не отличались от атрибута timestamp.
+            ExportTimestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            writer.WriteAttributeString("timestamp", ExportTimestamp);
+
+            WriteHeader(writer);
+
+            writer.WriteStartElement("XMI.content");
+            writer.WriteStartElement("UML", "Model", UmlNamespace);
+            writer.WriteAttributeString("name", "EA Model");
+            writer.WriteAttributeString("xmi.id", ModelXmiId);
+
+            writer.WriteStartElement("UML", "Namespace.ownedElement", UmlNamespace);
+
+            // Корневой класс модели: EA ожидает его в любом файле XMI 1.1 и по нему определяет
+            // начало дерева. Без него элементы импортируются в «мусорный» пакет.
+            writer.WriteStartElement("UML", "Class", UmlNamespace);
+            writer.WriteAttributeString("name", EaRootClassName);
+            writer.WriteAttributeString("xmi.id", EaRootClassId);
+            writer.WriteAttributeString("isRoot", "true");
+            writer.WriteAttributeString("isLeaf", "false");
+            writer.WriteAttributeString("isAbstract", "false");
+            writer.WriteEndElement(); // UML:Class (EARootClass)
+
+            // Все сущности выгрузки лежат в одном корневом пакете: EA строит по файлу одно
+            // дерево модели, а справочники-компоненты не могут быть контейнерами для типов.
+            writer.WriteStartElement("UML", "Package", UmlNamespace);
+            writer.WriteAttributeString("name", RootPackageName);
+            writer.WriteAttributeString("xmi.id", RootPackageId);
+
+            // Обязательный для UML 1.3 набор атрибутов пакета.
+            writer.WriteAttributeString("isRoot", "false");
+            writer.WriteAttributeString("isLeaf", "false");
+            writer.WriteAttributeString("isAbstract", "false");
+            writer.WriteAttributeString("visibility", "public");
+
+            // Теги пакета: EA заводит по ним сам пакет в t_package, а дерево модели строит
+            // по тегам package / package_name / owner. Пакет без этих тегов импортируется,
+            // но его содержимое в дерево не попадает.
+            WriteTaggedValues(
+                writer,
+                Tag(PackageTag, RootPackageId),
+                Tag(PackageNameTag, RootPackageName),
+                Tag(EaStyleTag, "Public"),
+                Tag(VersionTag, VersionValue),
+                Tag(PhaseTag, PhaseValue),
+                Tag(StatusTag, StatusValue),
+                Tag(AuthorTag, AuthorValue),
+                Tag(ComplexityTag, ComplexityValue),
+                Tag(TposTag, ZeroValue),
+                Tag(GentypeTag, GentypeValue));
+
+            // Единственный вложенный Namespace.ownedElement: несколько контейнеров подряд EA
+            // разбирает как один, и элементы из «лишних» пропадают при импорте.
+            writer.WriteStartElement("UML", "Namespace.ownedElement", UmlNamespace);
+
+            // Пакет выгрузки в терминах EA — просто контейнер; вложенность типов и событий
+            // задаётся тегами package/owner, а визуально — связью «Содержит».
+            elementIndex = 0;
+            foreach (CatalogModel catalog in model.Catalogs)
+                WriteCatalog(writer, catalog, exportComments, elementIndex++);
+
+            // Типы идут на одном уровне со справочниками: UML:Component не является контейнером
+            // для классов, поэтому вхождение типа в справочник выражено связью «Содержит».
+            foreach (ClassModel cls in model.Classes)
+                WriteClass(writer, cls, exportComments, elementIndex++);
+
+            if (exportEvents) WriteEvents(writer, model, exportComments);
+
+            // Связь «справочник содержит тип»: справочник — UML:Component, поэтому его можно
+            // указать типом конца ассоциации (в UML 1.3 AssociationEnd.type требует Classifier).
+            foreach (CatalogTypeAssocModel catalogTypeAssoc in model.CatalogTypeAssocs)
+                WriteContainsAssociation(writer, catalogTypeAssoc, elementIndex++);
+
+            foreach (AssocModel association in model.Assocs)
+                WriteAssociation(writer, association, elementIndex++);
+
+            writer.WriteEndElement(); // UML:Namespace.ownedElement (корневой пакет)
+
+            writer.WriteEndElement(); // UML:Package (EAPK_ROOT_DOCS)
+
+            // Базовые типы UML объявляются ПОСЛЕ закрытия пакета, на уровне модели: в выгрузке
+            // самого EA они стоят между </UML:Package> и </UML:Namespace.ownedElement> модели.
+            // Атрибуты ссылаются на них через UML:StructuralFeature.type/xmi.idref.
+            foreach (DataTypeDefinition dataType in DataTypes)
+                WriteDataType(writer, dataType.Id, dataType.Name);
+
+            writer.WriteEndElement(); // UML:Namespace.ownedElement (модель)
+            writer.WriteEndElement(); // UML:Model
+
+            // Пользовательские теги элементов (GUID DOCs и настройки структуры) записываются
+            // на уровне модели, а не внутри UML:Component/UML:Class: во вложенном
+            // ModelElement.taggedValue EA читает только системные свойства t_object.
+            // В выгрузке самого EA эти теги лежат плоским списком сразу после </UML:Model>,
+            // поэтому relation к элементу задаётся атрибутом modelElement.
+            WriteModelLevelTaggedValues(writer, model, exportEvents, exportSettings);
+
+            writer.WriteEndElement(); // XMI.content
+
+            // Закрывающая секция XMI 1.1: без XMI.difference и XMI.extensions EA считает файл
+            // неполным и может отказаться импортировать расширения профиля.
+            writer.WriteStartElement("XMI.difference");
+            writer.WriteEndElement(); // XMI.difference
+
+            writer.WriteStartElement("XMI.extensions");
+            writer.WriteAttributeString("xmi.extender", EaExtender);
+            writer.WriteStartElement("EAModel.paramSub");
+            writer.WriteEndElement(); // EAModel.paramSub
+            writer.WriteEndElement(); // XMI.extensions
+
+            writer.WriteEndElement(); // XMI
+            writer.WriteEndDocument();
+        }
+    }
+
+    /// <summary>Записывает секцию XMI.header с описанием экспортёра.</summary>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    private static void WriteHeader(XmlWriter writer)
+    {
+        writer.WriteStartElement("XMI.header");
+        writer.WriteStartElement("XMI.documentation");
+        writer.WriteElementString("XMI.exporter", Exporter);
+        writer.WriteElementString("XMI.exporterVersion", ExporterVersion);
+        // exporterID — номер версии формата XMI, которым пользуется экспортёр; EA читает его
+        // при импорте, чтобы выбрать разборщик 1.1 (значение то же, что у самого EA).
+        writer.WriteElementString("XMI.exporterID", ExporterId);
+        writer.WriteEndElement(); // XMI.documentation
+        writer.WriteEndElement(); // XMI.header
+    }
+
+    /// <summary>
+    /// Формирует набор тегов, который EA проставляет любому элементу модели.
+    /// </summary>
+    /// <remarks>
+    /// Список и порядок тегов повторяют выгрузку самого EA: без блока справочник или тип
+    /// импортируется, но теряет привязку к пакету, поэтому элементарные теги идут первыми,
+    /// а стиль отрисовки — последним.
+    /// </remarks>
+    /// <param name="elementType">Значение тега ea_stype (Class, Component, Signal или Note).</param>
+    /// <param name="documentation">Описание элемента; пустое значение означает отсутствие тега.</param>
+    /// <param name="ownerId">Идентификатор владельца (справочника) или пустая строка.</param>
+    /// <param name="position">Порядковый номер элемента внутри пакета (тег tpos).</param>
+    private static List<KeyValuePair<string, string>> ElementTags(
+        string elementType,
+        string documentation,
+        string ownerId,
+        int position)
+    {
+        var tags = new List<KeyValuePair<string, string>>();
+        if (!string.IsNullOrWhiteSpace(documentation)) tags.Add(Tag(DocumentationTag, documentation));
+
+        tags.Add(Tag("isSpecification", "false"));
+        tags.Add(Tag(EaStyleTag, elementType));
+        tags.Add(Tag(EaNTypeTag, ZeroValue));
+        tags.Add(Tag(VersionTag, VersionValue));
+        tags.Add(Tag(IsActiveTag, "false"));
+        tags.Add(Tag(PackageTag, RootPackageId));
+        if (!string.IsNullOrWhiteSpace(ownerId)) tags.Add(Tag(OwnerTag, ownerId));
+        tags.Add(Tag(DateCreatedTag, ExportTimestamp));
+        tags.Add(Tag(DateModifiedTag, ExportTimestamp));
+        tags.Add(Tag(GentypeTag, GentypeValue));
+        tags.Add(Tag(TaggedTag, ZeroValue));
+        tags.Add(Tag(PackageNameTag, RootPackageName));
+        tags.Add(Tag(PhaseTag, PhaseValue));
+        tags.Add(Tag(AuthorTag, AuthorValue));
+        tags.Add(Tag(ComplexityTag, ComplexityValue));
+        tags.Add(Tag(StatusTag, StatusValue));
+        tags.Add(Tag(TposTag, position.ToString()));
+        // ea_localid и ea_eleType заполняют служебные столбцы t_object: по ним EA отличает
+        // элемент модели от диаграммы. Порядковый номер уникален в пределах одной выгрузки.
+        tags.Add(Tag(EaLocalIdTag, (position + 1).ToString()));
+        tags.Add(Tag(EaElementTypeTag, ElementElementValue));
+        tags.Add(Tag(StyleTag, ElementStyleValue));
+        return tags;
+    }
+
+    /// <summary>Записывает UML:Component справочника со стереотипом «catalog».</summary>
+    /// <remarks>
+    /// Внутри ModelElement.taggedValue компонента остаются только служебные теги EA: GUID DOCs
+    /// и настройки структуры выгружаются на уровне модели методом
+    /// <see cref="WriteModelLevelTaggedValues"/>, потому что EA читает их только по атрибуту
+    /// modelElement, а не из вложенного блока тегов самого элемента.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="catalog">Справочник DOCs.</param>
+    /// <param name="exportComments">Флаг выгрузки комментариев.</param>
+    /// <param name="position">Порядковый номер элемента в пакете (тег tpos).</param>
+    private static void WriteCatalog(
+        XmlWriter writer,
+        CatalogModel catalog,
+        bool exportComments,
+        int position)
+    {
+        writer.WriteStartElement("UML", "Component", UmlNamespace);
+        writer.WriteAttributeString("name", catalog.Name ?? string.Empty);
+        writer.WriteAttributeString("xmi.id", ModelId(catalog.Guid, $"Catalog_{catalog.Name}"));
+
+        // namespace указывает на корневой пакет: EA по этому атрибуту раскладывает элементы
+        // по дереву модели, а не полагается только на вложенность Namespace.ownedElement.
+        writer.WriteAttributeString("namespace", RootPackageId);
+
+        // Обязательный для UML 1.3 набор атрибутов: isSpecification в выгрузке самого EA
+        // у компонента идёт тегом, а не атрибутом элемента, поэтому здесь его нет.
+        writer.WriteAttributeString("isRoot", "false");
+        writer.WriteAttributeString("isLeaf", "false");
+        writer.WriteAttributeString("isAbstract", "false");
+        writer.WriteAttributeString("visibility", "public");
+
+        // Объявление стереотипа обязательно: EA заводит запись в t_stereotypes для каждого
+        // применения стереотипа и без имени в блоке UML:Stereotype падает на AppliesTo.
+        WriteStereotype(writer, CatalogStereotype);
+
+        // Все теги компонента обязаны лежать в одном UML:ModelElement.taggedValue:
+        // повторные контейнеры у одного элемента EA разбирает как ошибку структуры.
+        // Первыми идут теги, по которым EA строит дерево модели и заполняет свойства элемента.
+        var catalogTags = ElementTags(
+            ComponentStyle,
+            exportComments ? catalog.Comment : null,
+            null,
+            position);
+        catalogTags.Add(Tag(StereotypeTag, CatalogStereotype));
+
+        WriteTaggedValues(writer, catalogTags);
+
+        writer.WriteEndElement(); // UML:Component
+    }
+
+    /// <summary>Записывает UML:Class типа объектов с его атрибутами.</summary>
+    /// <remarks>
+    /// Теги GUID DOCs и настроек структуры у класса не выгружаются: настройки принадлежат
+    /// справочнику, а GUID DOCs и настройки записываются на уровне модели методом
+    /// <see cref="WriteModelLevelTaggedValues"/>.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="cls">Тип объектов DOCs.</param>
+    /// <param name="exportComments">Флаг выгрузки комментариев.</param>
+    /// <param name="position">Порядковый номер элемента в пакете (тег tpos).</param>
+    private static void WriteClass(
+        XmlWriter writer,
+        ClassModel cls,
+        bool exportComments,
+        int position)
+    {
+        if (cls == null) return;
+
+        writer.WriteStartElement("UML", "Class", UmlNamespace);
+        writer.WriteAttributeString("name", cls.Name ?? string.Empty);
+        writer.WriteAttributeString("xmi.id", ModelId(cls.Guid, $"Class_{cls.Name}"));
+
+        // namespace указывает на корневой пакет — тип лежит в том же пакете, что и справочники.
+        writer.WriteAttributeString("namespace", RootPackageId);
+
+        // Обязательный для UML 1.3 набор атрибутов класса. isSpecification у самого EA идёт
+        // тегом, а не атрибутом элемента, поэтому здесь записывается только isActive.
+        writer.WriteAttributeString("visibility", "public");
+        writer.WriteAttributeString("isRoot", "false");
+        writer.WriteAttributeString("isLeaf", "false");
+        writer.WriteAttributeString("isAbstract", "false");
+        // isActive — стандартный признак активного класса UML 1.3; типы DOCs активными не являются.
+        writer.WriteAttributeString("isActive", "false");
+
+        // Объявление стереотипа «type» — тот же обязательный блок, что и у справочника.
+        WriteStereotype(writer, TypeStereotype);
+
+        // Стандартный набор тегов EA. owner ссылается на компонент справочника: по нему EA
+        // показывает тип внутри справочника, поэтому вложенность Namespace.ownedElement не нужна.
+        var classTags = ElementTags(
+            ClassStyle,
+            exportComments ? cls.Comment : null,
+            ModelId(cls.CatalogGuid, $"Catalog_{cls.CatalogGuid}"),
+            position);
+        classTags.Add(Tag(StereotypeTag, TypeStereotype));
+
+        WriteTaggedValues(writer, classTags);
+
+        if (cls.Parameters.Count > 0)
+        {
+            writer.WriteStartElement("UML", "Classifier.feature", UmlNamespace);
+            int parameterIndex = 0;
+            // Последний рубеж защиты от одноимённых атрибутов: EA отвергает два атрибута с
+            // одинаковым именем в одном классе ошибкой «повторяющиеся значения в индексе,
+            // ключевых полях или связях». У системных параметров DOCs встречаются разные GUID
+            // при одинаковом имени, поэтому дубликаты отбрасываются и здесь.
+            var uniqueParameters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ParamModel parameter in cls.Parameters)
+            {
+                if (parameter == null) continue;
+                if (!uniqueParameters.Add(parameter.Name ?? string.Empty)) continue;
+                WriteAttribute(writer, parameter, parameterIndex++);
+            }
+            writer.WriteEndElement(); // UML:Classifier.feature
+        }
+
+        writer.WriteEndElement(); // UML:Class
+    }
+
+    /// <summary>Записывает UML:Attribute — параметр типа объектов.</summary>
+    /// <remarks>
+    /// Порядок вложенных элементов повторяет выгрузку EA: значение по умолчанию, ссылка на
+    /// базовый тип UML и только затем блок тегов. Атрибут не имеет xmi.id — EA ссылается на
+    /// параметры по тегу ea_guid, а лишний идентификатор создаёт дубликат в t_attribute.
+    /// Значение ea_guid берётся из ParamModel.Guid (идентификатор пары «класс + параметр»),
+    /// а не из ParameterInfo.Guid: у общих параметров справочника последний одинаков во всех
+    /// типах, и EA роняет импорт на повторяющихся значениях в индексе. Тот же ключ «класс +
+    /// параметр» используется и для xmi.id тега <c>T-FLEX DOCs GUID</c>.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="parameter">Параметр (атрибут) типа объектов.</param>
+    /// <param name="position">Порядковый номер параметра внутри класса (тег position).</param>
+    private static void WriteAttribute(XmlWriter writer, ParamModel parameter, int position)
+    {
+        if (parameter == null) return;
+
+        // Уникальный для пары «класс + параметр» hex-идентификатор атрибута: ParamModel.Guid
+        // уже посчитан в BuildClasses как Property_{cls.Guid}_{parameter.Guid} и потому
+        // различает одноимённые общие параметры разных типов.
+        string uniqueAttrHex =
+            !string.IsNullOrWhiteSpace(parameter.Guid) &&
+            parameter.Guid.StartsWith("EAID_", StringComparison.OrdinalIgnoreCase)
+                ? parameter.Guid.Substring(5)
+                : XmiSupport.CreateDeterministicGuid($"Attr_{position}_{parameter.DocsGuid}")
+                    .ToString("N").ToUpperInvariant();
+
+        // EA хранит ea_guid в виде «{XXXXXXXX-....}», поэтому hex приводится к формату «D».
+        string eaGuidFormatted = Guid.TryParseExact(uniqueAttrHex, "N", out Guid parsedAttrGuid)
+            ? "{" + parsedAttrGuid.ToString("D").ToUpperInvariant() + "}"
+            : "{" + uniqueAttrHex + "}";
+
+        writer.WriteStartElement("UML", "Attribute", UmlNamespace);
+        writer.WriteAttributeString("name", parameter.Name ?? string.Empty);
+
+        // Обязательный для UML 1.3 набор атрибутов атрибута.
+        writer.WriteAttributeString("changeable", "none");
+        writer.WriteAttributeString("visibility", "public");
+        writer.WriteAttributeString("ownerScope", "instance");
+        writer.WriteAttributeString("targetScope", "instance");
+
+        // Пустое значение по умолчанию: EA ожидает этот узел у каждого атрибута.
+        writer.WriteStartElement("UML", "Attribute.initialValue", UmlNamespace);
+        writer.WriteStartElement("UML", "Expression", UmlNamespace);
+        writer.WriteEndElement(); // UML:Expression
+        writer.WriteEndElement(); // UML:Attribute.initialValue
+
+        // Тип атрибута задаётся ссылкой на базовый тип UML и дублируется тегом type
+        // (имя тега строчными — как ожидает EA) для схем, разбирающих только теги.
+        string eaType = !string.IsNullOrWhiteSpace(parameter.EaType) ? parameter.EaType : parameter.TypeRef;
+        WriteAttributeType(writer, DataTypeIdFor(eaType));
+
+        // Все теги атрибута обязаны лежать в одном UML:ModelElement.taggedValue: повторные
+        // контейнеры у одного атрибута EA разбирает как ошибку структуры UML 1.3.
+        var attributeTags = new List<KeyValuePair<string, string>>
+        {
+            Tag(TypeTag, eaType),
+            Tag(DerivedTag, ZeroValue),
+            Tag(OrderedTag, ZeroValue),
+            Tag(StaticTag, ZeroValue),
+            Tag(CollectionTag, CollectionFalseValue),
+            Tag(PositionTag, position.ToString()),
+            Tag(AttrLowerBoundTag, UpperBoundOneValue),
+            Tag(AttrUpperBoundTag, UpperBoundOneValue),
+            // ea_guid — постоянный идентификатор атрибута для EA (атрибуты не имеют xmi.id).
+            // Значение обязано быть уникальным в пределах базы: общие параметры справочника
+            // («Наименование», «Обозначение») встречаются во всех его типах с одинаковым
+            // ParameterInfo.Guid, поэтому берётся идентификатор пары «класс + параметр» —
+            // уже вычисленный в BuildClasses ParamModel.Guid.
+            Tag(EaGuidTag, eaGuidFormatted),
+            Tag(StyleExTag, StyleExValue)
+        };
+
+        // Тег T-FLEX DOCs GUID, как в выгрузке EA, несёт собственный xmi.id, поэтому пишется
+        // в том же контейнере, но отдельной записью с атрибутом идентификатора. Ключом служит
+        // уже вычисленный uniqueAttrHex («класс + параметр»): привязка к parameter.Guid давала
+        // одинаковый xmi.id всем атрибутам с пустым или общим GUID, и EA ронял импорт на
+        // повторяющихся значениях в индексе.
+        WriteTaggedValuesWithId(
+            writer,
+            attributeTags,
+            GuidTag,
+            parameter.DocsGuid.ToString(),
+            XmiSupport.FormatEaId(XmiSupport.CreateDeterministicGuid($"GuidTag_{uniqueAttrHex}")));
+
+        writer.WriteEndElement(); // UML:Attribute
+    }
+
+    /// <summary>Записывает все события выгрузки одним проходом без повторов.</summary>
+    /// <remarks>
+    /// Событие DOCs может входить сразу в несколько справочников, поэтому обход пар
+    /// «справочник — событие» писал один и тот же xmi.id несколько раз, и EA на импорте падал
+    /// с ошибкой «повторяющиеся значения в индексе, ключевых полях или связях». Здесь каждое
+    /// событие записывается один раз, а вхождение в справочник выражается тегом owner.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="model">Готовая модель выгрузки.</param>
+    /// <param name="exportComments">Флаг выгрузки комментариев.</param>
+    private static void WriteEvents(
+        XmlWriter writer,
+        ExportModel model,
+        bool exportComments)
+    {
+        if (model == null) return;
+
+        var written = new HashSet<string>(StringComparer.Ordinal);
+        foreach (CatalogModel catalog in model.Catalogs)
+        {
+            if (catalog.Events == null) continue;
+
+            foreach (EventModel eventModel in catalog.Events)
+            {
+                if (eventModel == null) continue;
+
+                // Ключом служит xmi.id события: он вычисляется из GUID сущности DOCs и потому
+                // одинаков у одного события, попавшего в несколько справочников.
+                string eventId = ModelId(eventModel.Guid, $"Event_{eventModel.Name}");
+                if (!written.Add(eventId)) continue;
+
+                WriteEvent(writer, eventModel, exportComments, elementIndex++);
+            }
+        }
+    }
+
+    /// <summary>Записывает событие справочника как UML:Class со стереотипом «event».</summary>
+    /// <remarks>
+    /// Тег UML:Signal в выгрузке не используется: EA импортирует события как класс со стереотипом,
+    /// иначе элемент не получает запись в t_stereotypes и теряет привязку к справочнику.
+    /// Признак сигнала выражается служебным тегом ea_stype = Signal.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="eventModel">Событие DOCs.</param>
+    /// <param name="exportComments">Флаг выгрузки комментариев.</param>
+    /// <param name="position">Порядковый номер элемента в пакете (тег tpos).</param>
+    private static void WriteEvent(
+        XmlWriter writer,
+        EventModel eventModel,
+        bool exportComments,
+        int position)
+    {
+        if (eventModel == null) return;
+
+        writer.WriteStartElement("UML", "Class", UmlNamespace);
+        writer.WriteAttributeString("name", eventModel.Name ?? string.Empty);
+        writer.WriteAttributeString("xmi.id", ModelId(eventModel.Guid, $"Event_{eventModel.Name}"));
+
+        // namespace указывает на корневой пакет — событие лежит на одном уровне с типами.
+        writer.WriteAttributeString("namespace", RootPackageId);
+
+        // Обязательный для UML 1.3 набор атрибутов класса; isSpecification здесь идёт тегом.
+        writer.WriteAttributeString("visibility", "public");
+        writer.WriteAttributeString("isRoot", "false");
+        writer.WriteAttributeString("isLeaf", "false");
+        writer.WriteAttributeString("isAbstract", "false");
+        writer.WriteAttributeString("isActive", "false");
+
+        // Объявление стереотипа «event» — без этого блока EA падает на t_stereotypes.AppliesTo.
+        WriteStereotype(writer, EventStereotype);
+
+        // owner ссылается на справочник, в который событие входит: по этому тегу EA помещает
+        // событие внутрь компонента-справочника.
+        var eventTags = ElementTags(
+            SignalStyle,
+            exportComments ? eventModel.Comment : null,
+            ModelId(eventModel.CatalogGuid, $"Catalog_{eventModel.CatalogGuid}"),
+            position);
+        eventTags.Add(Tag(StereotypeTag, EventStereotype));
+
+        WriteTaggedValues(writer, eventTags);
+
+        writer.WriteEndElement(); // UML:Class (событие)
+    }
+
+    /// <summary>Записывает UML:Association с двумя концами и кратностями из модели DOCs.</summary>
+    /// <remarks>
+    /// Оформление повторяет выгрузку EA. Направление берётся из <see cref="AssocModel.Direction"/>:
+    /// у направленных связей (иерархия «Состоит из», подключение «Родительский объект» /
+    /// «Дочерний объект») оно равно «Source -> Destination», и стрелка ставится только на конце
+    /// приёмника. У равнозначных межсправочных связей направление равно «Unspecified», и это
+    /// значение обязательно пишется в теге direction: без него парсер XMI 1.1 в EA сам
+    /// вычисляет направление и дорисовывает стрелку к целевому классу. Оба конца такой связи
+    /// ненавигируемы и получают Navigable=Unspecified, поэтому EA рисует линию без стрелок.
+    /// Атрибут name не пишется при пустом имени связи — так же, как в выгрузке EA у связей,
+    /// которые опознаются только по ролям концов. Теги lt/rt переносят роли концов, а теги
+    /// style/linemode и sourcestyle/deststyle задают оформление линии.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="association">Ассоциация между типами (связь, подключение или иерархия).</param>
+    /// <param name="position">Порядковый номер связи в пакете (значение тега ea_localid).</param>
+    private static void WriteAssociation(XmlWriter writer, AssocModel association, int position)
+    {
+        if (association == null) return;
+
+        string sourceId = ModelId(association.SourceClassGuid, $"Class_{association.SourceClassName}");
+        string targetId = ModelId(association.TargetClassGuid, $"Class_{association.TargetClassName}");
+
+        // Признак направленной связи: у равнозначных межсправочных связей Direction равен
+        // «Unspecified», и стрелки на такой связи быть не должно.
+        bool isDirected = string.Equals(association.Direction, EaDirection, StringComparison.Ordinal);
+
+        writer.WriteStartElement("UML", "Association", UmlNamespace);
+
+        // EA не пишет пустой атрибут name: у равнозначных межсправочных связей имя связи
+        // отсутствует, а роль каждого конца задаётся отдельно в UML:AssociationEnd.
+        if (!string.IsNullOrWhiteSpace(association.Name))
+            writer.WriteAttributeString("name", association.Name);
+
+        writer.WriteAttributeString("xmi.id", ModelId(association.AssocGuid, $"Association_{association.Name}"));
+
+        // Обязательный для UML 1.3 набор атрибутов ассоциации; visibility="public" EA
+        // записывает в t_connector, без него связь помечается как скрытая.
+        writer.WriteAttributeString("visibility", "public");
+        writer.WriteAttributeString("isRoot", "false");
+        writer.WriteAttributeString("isLeaf", "false");
+        writer.WriteAttributeString("isAbstract", "false");
+
+        // Полный набор служебных тегов связи: без ea_sourceName/ea_targetName EA теряет имена
+        // концов, без ea_sourceID/ea_targetID — не связывает концы с уже созданными классами.
+        var associationTags = new List<KeyValuePair<string, string>>
+        {
+            Tag(StyleTag, AssociationStyleValue),
+            Tag(EaTypeTag, "Association")
+        };
+
+        // Для направленных связей (иерархия, подключение) ставится "Source -> Destination",
+        // а для равнозначных межсправочных связей обязательно передаётся "Unspecified" —
+        // без этого тега EA при импорте XMI 1.1 сам выставляет направление и рисует стрелку.
+        associationTags.Add(Tag(DirectionTag, isDirected ? EaDirection : EaUnspecifiedDirection));
+
+        associationTags.Add(Tag(LineModeTag, AssociationStyleValue));
+        associationTags.Add(Tag(LineColorTag, ZeroValue));
+        associationTags.Add(Tag(LineWidthTag, ZeroValue));
+        associationTags.Add(Tag(SeqNoTag, ZeroValue));
+        associationTags.Add(Tag(HeadStyleTag, ZeroValue));
+        associationTags.Add(Tag(LineStyleTag, ZeroValue));
+        associationTags.Add(Tag(EaLocalIdTag, (position + 1).ToString()));
+        associationTags.Add(Tag(EaSourceNameTag, association.SourceClassName));
+        associationTags.Add(Tag(EaTargetNameTag, association.TargetClassName));
+        associationTags.Add(Tag(EaSourceTypeTag, ClassStyle));
+        associationTags.Add(Tag(EaTargetTypeTag, ClassStyle));
+        associationTags.Add(Tag(EaSourceIdTag, sourceId));
+        associationTags.Add(Tag(EaTargetIdTag, targetId));
+        associationTags.Add(Tag(
+            LowerBoundTag,
+            XmiSupport.FormatMultiplicity(association.SourceLower, association.SourceUpper)));
+
+        // lt/rt дублируют роли концов в виде, который EA показывает у линии связи.
+        if (!string.IsNullOrWhiteSpace(association.SourceRole))
+            associationTags.Add(Tag(LtTag, "+" + association.SourceRole));
+        if (!string.IsNullOrWhiteSpace(association.TargetRole))
+            associationTags.Add(Tag(RtTag, "+" + association.TargetRole));
+
+        associationTags.Add(Tag(MidNameTag, association.Name));
+        associationTags.Add(Tag(
+            UpperBoundTag,
+            XmiSupport.FormatMultiplicity(association.TargetLower, association.TargetUpper)));
+
+        WriteTaggedValues(writer, associationTags);
+
+        writer.WriteStartElement("UML", "Association.connection", UmlNamespace);
+
+        // Первым идёт конец источника, вторым — конец приёмника: так направление связи
+        // сохраняется при чтении файла без секции xmi:Extension. У направленной связи источник
+        // остаётся ненавигируемым (стрелка только у приёмника), у равнозначной ненавигируемы оба
+        // конца, а оформление обоих задано как Unspecified — именно это и убирает стрелки.
+        WriteAssociationEnd(
+            writer,
+            association.SourceClassGuid,
+            association.SourceRole,
+            true,
+            false,
+            UnspecifiedNavigableValue,
+            association.SourceLower,
+            association.SourceUpper);
+
+        WriteAssociationEnd(
+            writer,
+            association.TargetClassGuid,
+            association.TargetRole,
+            false,
+            isDirected,
+            isDirected ? NavigableValue : UnspecifiedNavigableValue,
+            association.TargetLower,
+            association.TargetUpper);
+
+        writer.WriteEndElement(); // UML:Association.connection
+        writer.WriteEndElement(); // UML:Association
+    }
+
+    /// <summary>Записывает UML:AssociationEnd в оформлении выгрузки EA.</summary>
+    /// <remarks>
+    /// EA задаёт кратность XML-атрибутом multiplicity строкой («0..*», «1»), а не структурой
+    /// UML:Multiplicity, и не присваивает концам xmi.id. Стрелку рисует тег sourcestyle/deststyle:
+    /// конец со значением Navigable получает стрелку, Unspecified и Non-Navigable — нет.
+    /// Значение тега согласовано с атрибутом isNavigable: у направленной связи навигируемым
+    /// (и единственным со стрелкой) остаётся конец-приёмник, у равнозначной оба конца
+    /// ненавигируемы и оформлены как Unspecified.
+    /// Признак <paramref name="isSource"/> определяет, в какой из двух тегов попадёт
+    /// <paramref name="endStyle"/>, а также значение служебного тега ea_end.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="classGuid">Идентификатор класса, на который ссылается конец.</param>
+    /// <param name="role">Роль конца ассоциации; может быть пустой.</param>
+    /// <param name="isSource">Признак конца-источника (иначе конец-приёмник).</param>
+    /// <param name="isNavigable">Признак навигируемого конца.</param>
+    /// <param name="endStyle">Стиль конца: Navigable, Non-Navigable или Unspecified.</param>
+    /// <param name="lower">Нижняя граница кратности.</param>
+    /// <param name="upper">Верхняя граница кратности (-1 или «*» означают неограниченную).</param>
+    private static void WriteAssociationEnd(
+        XmlWriter writer,
+        string classGuid,
+        string role,
+        bool isSource,
+        bool isNavigable,
+        string endStyle,
+        string lower,
+        string upper)
+    {
+        writer.WriteStartElement("UML", "AssociationEnd", UmlNamespace);
+        if (!string.IsNullOrWhiteSpace(role)) writer.WriteAttributeString("name", role);
+        writer.WriteAttributeString("type", ModelId(classGuid, $"AssociationEndClass_{role}"));
+
+        // Кратность пишется строкой, как в выгрузке EA: 0..*, 1 и подобные значения он
+        // переносит в свойства конца ассоциации без дополнительной структуры.
+        writer.WriteAttributeString(
+            MultiplicityAttribute,
+            XmiSupport.FormatMultiplicity(lower, upper));
+
+        // Обязательный для UML 1.3 набор атрибутов конца ассоциации.
+        writer.WriteAttributeString("visibility", "public");
+        writer.WriteAttributeString("aggregation", "none");
+        writer.WriteAttributeString("isOrdered", "false");
+        writer.WriteAttributeString("isNavigable", isNavigable ? "true" : "false");
+
+        // sourcestyle задаёт оформление конца-источника, deststyle — конца-приёмника; значение
+        // тега обязательно согласовано с isNavigable, иначе стрелка рисуется не с той стороны.
+        WriteTaggedValues(
+            writer,
+            Tag(isSource ? SourceStyleTag : DestStyleTag, endStyle),
+            Tag(EaEndTag, isSource ? EaEndSource : EaEndTarget));
+
+        writer.WriteEndElement(); // UML:AssociationEnd
+    }
+
+    /// <summary>Создаёт пару «тег — значение» для передачи в <see cref="WriteTaggedValues"/>.</summary>
+    /// <param name="tag">Имя тега.</param>
+    /// <param name="value">Значение тега.</param>
+    private static KeyValuePair<string, string> Tag(string tag, string value)
+    {
+        return new KeyValuePair<string, string>(tag, value);
+    }
+
+    /// <summary>Записывает связь «Содержит» между компонентом справочника и классом его типа.</summary>
+    /// <remarks>
+    /// В UML 1.3 AssociationEnd.type требует Classifier, поэтому концом ассоциации может быть
+    /// UML:Component справочника, но не UML:Package. Оформление повторяет выгрузку EA: конец
+    /// справочника помечен как Navigable, конец типа — как Non-Navigable, оба ненавигируемые
+    /// и без кратности, поэтому связь получается без стрелок.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="catalogTypeAssoc">Пара «справочник — тип» из модели выгрузки.</param>
+    /// <param name="position">Порядковый номер связи в пакете (значение тега ea_localid).</param>
+    private static void WriteContainsAssociation(
+        XmlWriter writer,
+        CatalogTypeAssocModel catalogTypeAssoc,
+        int position)
+    {
+        if (catalogTypeAssoc == null) return;
+
+        string catalogId = ModelId(catalogTypeAssoc.CatalogGuid, $"Catalog_{catalogTypeAssoc.CatalogName}");
+        string typeId = ModelId(catalogTypeAssoc.TypeGuid, $"Class_{catalogTypeAssoc.TypeName}");
+        string associationId = ModelId(
+            catalogTypeAssoc.Guid,
+            $"Contains_{catalogTypeAssoc.CatalogGuid}_{catalogTypeAssoc.TypeGuid}");
+
+        writer.WriteStartElement("UML", "Association", UmlNamespace);
+        writer.WriteAttributeString("name", ContainsAssociationName);
+        writer.WriteAttributeString("xmi.id", associationId);
+
+        // Обязательный для UML 1.3 набор атрибутов ассоциации; visibility="public" EA
+        // записывает в t_connector, без него связь помечается как скрытая.
+        writer.WriteAttributeString("visibility", "public");
+        writer.WriteAttributeString("isRoot", "false");
+        writer.WriteAttributeString("isLeaf", "false");
+        writer.WriteAttributeString("isAbstract", "false");
+
+        // Направление у связи «Содержит» не задаётся, поэтому и стрелки на ней нет.
+        WriteTaggedValues(
+            writer,
+            Tag(StyleTag, AssociationStyleValue),
+            Tag(EaTypeTag, "Association"),
+            Tag(LineModeTag, AssociationStyleValue),
+            Tag(LineColorTag, ZeroValue),
+            Tag(LineWidthTag, ZeroValue),
+            Tag(SeqNoTag, ZeroValue),
+            Tag(HeadStyleTag, ZeroValue),
+            Tag(LineStyleTag, ZeroValue),
+            Tag(EaLocalIdTag, (position + 1).ToString()),
+            Tag(EaSourceNameTag, catalogTypeAssoc.TypeName),
+            Tag(EaTargetNameTag, catalogTypeAssoc.CatalogName),
+            Tag(EaSourceTypeTag, ClassStyle),
+            Tag(EaTargetTypeTag, ComponentStyle),
+            Tag(EaSourceIdTag, typeId),
+            Tag(EaTargetIdTag, catalogId),
+            Tag(MidNameTag, ContainsAssociationName));
+
+        writer.WriteStartElement("UML", "Association.connection", UmlNamespace);
+
+        // Конец типа: его имя EA пишет в ea_sourceName, поэтому конец идёт первым.
+        WriteContainerEnd(writer, typeId, NavigableValue, true);
+
+        // Конец справочника: приёмник, стиль Non-Navigable как в выгрузке EA.
+        WriteContainerEnd(writer, catalogId, NonNavigableValue, false);
+
+        writer.WriteEndElement(); // UML:Association.connection
+        writer.WriteEndElement(); // UML:Association
+    }
+
+    /// <summary>Записывает конец связи «Содержит» в оформлении выгрузки EA.</summary>
+    /// <remarks>
+    /// Кратность у концов не пишется, оба конца ненавигируемые — так EA рисует связь
+    /// контейнирования без стрелок, как и в выгрузке XMI 2.1.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="elementId">Идентификатор элемента на конце связи (класс типа или компонент).</param>
+    /// <param name="navigableStyle">Стиль конца из выгрузки EA (Navigable или Non-Navigable).</param>
+    /// <param name="isSource">Признак конца-источника (иначе конец-приёмник).</param>
+    private static void WriteContainerEnd(
+        XmlWriter writer,
+        string elementId,
+        string navigableStyle,
+        bool isSource)
+    {
+        writer.WriteStartElement("UML", "AssociationEnd", UmlNamespace);
+        writer.WriteAttributeString("visibility", "public");
+        writer.WriteAttributeString("aggregation", "none");
+        writer.WriteAttributeString("isOrdered", "false");
+        writer.WriteAttributeString("isNavigable", "false");
+        writer.WriteAttributeString("type", elementId);
+
+        // sourcestyle задаёт оформление конца-источника, deststyle — конца-приёмника.
+        WriteTaggedValues(
+            writer,
+            Tag(isSource ? SourceStyleTag : DestStyleTag, navigableStyle),
+            Tag(EaEndTag, isSource ? EaEndSource : EaEndTarget));
+
+        writer.WriteEndElement(); // UML:AssociationEnd
+    }
+
+    /// <summary>Записывает объявление стереотипа элемента UML:ModelElement.stereotype → UML:Stereotype.</summary>
+    /// <remarks>
+    /// EA при импорте заводит по этому блоку запись в t_stereotypes и связывает её с элементом
+    /// через AppliesTo. Если элемент помечен тегом stereotype, но блока UML:Stereotype нет,
+    /// импорт падает с ошибкой столбца AppliesTo, поэтому блок обязателен для каждого стереотипа.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="stereotypeName">Имя стереотипа профиля (catalog или type).</param>
+    private static void WriteStereotype(XmlWriter writer, string stereotypeName)
+    {
+        if (string.IsNullOrWhiteSpace(stereotypeName)) return;
+
+        writer.WriteStartElement("UML", "ModelElement.stereotype", UmlNamespace);
+        writer.WriteStartElement("UML", "Stereotype", UmlNamespace);
+        writer.WriteAttributeString("name", stereotypeName);
+        writer.WriteEndElement(); // UML:Stereotype
+        writer.WriteEndElement(); // UML:ModelElement.stereotype
+    }
+
+    /// <summary>
+    /// Записывает все переданные теги в единственном контейнере UML:ModelElement.taggedValue.
+    /// </summary>
+    /// <remarks>
+    /// Один элемент UML не может иметь несколько контейнеров taggedValue — EA воспринимает это
+    /// как нарушение структуры UML 1.3, поэтому теги копятся в списке и выгружаются одним блоком.
+    /// Экранирование значений выполняет XmlWriter, SecurityElement.Escape здесь применять нельзя.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="tags">Теги элемента; теги с пустым именем или значением пропускаются.</param>
+    private static void WriteTaggedValues(XmlWriter writer, IEnumerable<KeyValuePair<string, string>> tags)
+    {
+        if (tags == null) return;
+
+        bool containerStarted = false;
+        foreach (KeyValuePair<string, string> tag in tags)
+        {
+            if (string.IsNullOrWhiteSpace(tag.Key) || string.IsNullOrWhiteSpace(tag.Value)) continue;
+
+            if (!containerStarted)
+            {
+                writer.WriteStartElement("UML", "ModelElement.taggedValue", UmlNamespace);
+                containerStarted = true;
+            }
+
+            writer.WriteStartElement("UML", "TaggedValue", UmlNamespace);
+            writer.WriteAttributeString("tag", tag.Key);
+            writer.WriteAttributeString("value", tag.Value);
+            writer.WriteEndElement(); // UML:TaggedValue
+        }
+
+        if (containerStarted) writer.WriteEndElement(); // UML:ModelElement.taggedValue
+    }
+
+    /// <summary>Записывает теги элемента, заданные перечислением.</summary>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="tags">Теги элемента.</param>
+    private static void WriteTaggedValues(XmlWriter writer, params KeyValuePair<string, string>[] tags)
+    {
+        WriteTaggedValues(writer, (IEnumerable<KeyValuePair<string, string>>)tags);
+    }
+
+    /// <summary>
+    /// Записывает теги элемента вместе с одним дополнительным тегом, у которого есть xmi.id.
+    /// </summary>
+    /// <remarks>
+    /// В выгрузке EA тег T-FLEX DOCs GUID, в отличие от остальных тегов атрибута, объявлен с
+    /// собственным xmi.id. Все записи обязаны лежать в единственном контейнере
+    /// UML:ModelElement.taggedValue, поэтому общий список и «именованный» тег пишутся одной
+    /// операцией, а не двумя вызовами.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="tags">Основные теги элемента.</param>
+    /// <param name="idTagName">Имя тега с идентификатором.</param>
+    /// <param name="idTagValue">Значение тега с идентификатором.</param>
+    /// <param name="idTagId">Значение xmi.id этого тега.</param>
+    private static void WriteTaggedValuesWithId(
+        XmlWriter writer,
+        IEnumerable<KeyValuePair<string, string>> tags,
+        string idTagName,
+        string idTagValue,
+        string idTagId)
+    {
+        if (tags == null) return;
+
+        writer.WriteStartElement("UML", "ModelElement.taggedValue", UmlNamespace);
+
+        foreach (KeyValuePair<string, string> tag in tags)
+        {
+            if (string.IsNullOrWhiteSpace(tag.Key) || string.IsNullOrWhiteSpace(tag.Value)) continue;
+
+            writer.WriteStartElement("UML", "TaggedValue", UmlNamespace);
+            writer.WriteAttributeString("tag", tag.Key);
+            writer.WriteAttributeString("value", tag.Value);
+            writer.WriteEndElement(); // UML:TaggedValue
+        }
+
+        if (!string.IsNullOrWhiteSpace(idTagName) && !string.IsNullOrWhiteSpace(idTagValue))
+        {
+            writer.WriteStartElement("UML", "TaggedValue", UmlNamespace);
+            writer.WriteAttributeString("tag", idTagName);
+            writer.WriteAttributeString("value", idTagValue);
+            if (!string.IsNullOrWhiteSpace(idTagId)) writer.WriteAttributeString("xmi.id", idTagId);
+            writer.WriteEndElement(); // UML:TaggedValue
+        }
+
+        writer.WriteEndElement(); // UML:ModelElement.taggedValue
+    }
+
+    /// <summary>
+    /// Записывает пользовательские теги элементов на уровне модели.
+    /// </summary>
+    /// <remarks>
+    /// В XMI 1.1 (UML 1.3) EA читает пользовательские теги только из плоского списка
+    /// UML:TaggedValue: во вложенном блоке ModelElement.taggedValue компонента или класса он
+    /// разбирает лишь системные свойства t_object. Привязка к элементу задаётся атрибутом
+    /// modelElement, поэтому теги справочников, типов и событий собраны здесь — сразу после
+    /// </UML:Model>, как в выгрузке самого EA.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="model">Готовая модель выгрузки.</param>
+    /// <param name="exportEvents">Флаг выгрузки событий.</param>
+    /// <param name="exportSettings">Флаг выгрузки опций настройки структуры.</param>
+    private static void WriteModelLevelTaggedValues(
+        XmlWriter writer,
+        ExportModel model,
+        bool exportEvents,
+        bool exportSettings)
+    {
+        if (model == null) return;
+
+        // GUID DOCs и настройки структуры справочника.
+        foreach (CatalogModel catalog in model.Catalogs)
+        {
+            if (catalog == null) continue;
+
+            string catalogId = ModelId(catalog.Guid, $"Catalog_{catalog.Name}");
+            WriteModelTaggedValue(writer, catalogId, GuidTag, catalog.DocsGuid.ToString());
+
+            if (!exportSettings || catalog.Settings == null) continue;
+
+            foreach (KeyValuePair<string, string> setting in catalog.Settings)
+                WriteModelTaggedValue(writer, catalogId, setting.Key, setting.Value);
+        }
+
+        // GUID DOCs типов: настройки структуры им не принадлежат и здесь не повторяются.
+        foreach (ClassModel cls in model.Classes)
+        {
+            if (cls == null) continue;
+
+            WriteModelTaggedValue(
+                writer,
+                ModelId(cls.Guid, $"Class_{cls.Name}"),
+                GuidTag,
+                cls.DocsGuid.ToString());
+        }
+
+        if (!exportEvents) return;
+
+        // Событие может входить в несколько справочников, поэтому его тег пишется один раз —
+        // обход повторяет устранение повторов из WriteEvents.
+        var written = new HashSet<string>(StringComparer.Ordinal);
+        foreach (CatalogModel catalog in model.Catalogs)
+        {
+            if (catalog?.Events == null) continue;
+
+            foreach (EventModel eventModel in catalog.Events)
+            {
+                if (eventModel == null) continue;
+
+                string eventId = ModelId(eventModel.Guid, $"Event_{eventModel.Name}");
+                if (!written.Add(eventId)) continue;
+
+                WriteModelTaggedValue(writer, eventId, GuidTag, eventModel.DocsGuid.ToString());
+            }
+        }
+    }
+
+    /// <summary>Записывает один тег уровня модели с привязкой к элементу через modelElement.</summary>
+    /// <remarks>
+    /// Тег пишется плоским элементом в XMI.content рядом с UML:Model: контейнер
+    /// ModelElement.taggedValue на этом уровне EA не создаёт, а определяет принадлежность тега
+    /// исключительно по атрибуту modelElement.
+    /// </remarks>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="modelElementId">xmi.id элемента, к которому относится тег.</param>
+    /// <param name="tagName">Имя тега.</param>
+    /// <param name="tagValue">Значение тега; null заменяется пустой строкой.</param>
+    private static void WriteModelTaggedValue(
+        XmlWriter writer,
+        string modelElementId,
+        string tagName,
+        string tagValue)
+    {
+        if (string.IsNullOrWhiteSpace(modelElementId) || string.IsNullOrWhiteSpace(tagName)) return;
+
+        // Идентификатор тега детерминирован парой «элемент + тег», чтобы повторный импорт
+        // не создавал второй экземпляр того же пользовательского тега.
+        string tagId = XmiSupport.FormatEaId(
+            XmiSupport.CreateDeterministicGuid($"ModelTag_{modelElementId}_{tagName}"));
+
+        writer.WriteStartElement("UML", "TaggedValue", UmlNamespace);
+        writer.WriteAttributeString("tag", tagName);
+        writer.WriteAttributeString("xmi.id", tagId);
+        writer.WriteAttributeString("value", tagValue ?? string.Empty);
+        writer.WriteAttributeString("modelElement", modelElementId);
+        writer.WriteEndElement(); // UML:TaggedValue
+    }
+
+    /// <summary>Привязывает атрибут к базовому типу UML через UML:StructuralFeature.type.</summary>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="dataTypeId">Идентификатор базового типа (eaxmiid0…eaxmiid4).</param>
+    private static void WriteAttributeType(XmlWriter writer, string dataTypeId)
+    {
+        writer.WriteStartElement("UML", "StructuralFeature.type", UmlNamespace);
+        writer.WriteStartElement("UML", "Classifier", UmlNamespace);
+        writer.WriteAttributeString("xmi.idref", dataTypeId);
+        writer.WriteEndElement(); // UML:Classifier
+        writer.WriteEndElement(); // UML:StructuralFeature.type
+    }
+
+    /// <summary>Записывает объявление базового типа UML (UML:DataType).</summary>
+    /// <param name="writer">Открытый XML-писатель.</param>
+    /// <param name="dataTypeId">Идентификатор типа (eaxmiid0…eaxmiid4).</param>
+    /// <param name="name">Отображаемое имя типа.</param>
+    private static void WriteDataType(XmlWriter writer, string dataTypeId, string name)
+    {
+        writer.WriteStartElement("UML", "DataType", UmlNamespace);
+        writer.WriteAttributeString("xmi.id", dataTypeId);
+        writer.WriteAttributeString("name", name);
+        writer.WriteAttributeString("visibility", "private");
+        writer.WriteAttributeString("isRoot", "false");
+        writer.WriteAttributeString("isLeaf", "false");
+        writer.WriteAttributeString("isAbstract", "false");
+        writer.WriteEndElement(); // UML:DataType
+    }
+
+    /// <summary>Сопоставляет тип атрибута EA с идентификатором базового типа UML.</summary>
+    /// <param name="eaType">Тип из модели выгрузки (EaType или TypeRef).</param>
+    /// <returns>Идентификатор базового типа; для неизвестных типов — string (eaxmiid0).</returns>
+    private static string DataTypeIdFor(string eaType)
+    {
+        if (string.IsNullOrWhiteSpace(eaType)) return StringDataTypeId;
+
+        // Проверка по вхождению подстроки покрывает сразу оба вида значений: короткий тип EA
+        // («double», «int») и ссылку XMI 2.1 («EAC__double», «EAC__date»).
+        string type = eaType.Trim();
+        if (type.IndexOf("date", StringComparison.OrdinalIgnoreCase) >= 0) return DateTimeDataTypeId;
+        if (type.IndexOf("bool", StringComparison.OrdinalIgnoreCase) >= 0) return BooleanDataTypeId;
+        if (type.IndexOf("double", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            type.IndexOf("decimal", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            type.IndexOf("money", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            type.IndexOf("number", StringComparison.OrdinalIgnoreCase) >= 0) return DoubleDataTypeId;
+        if (type.IndexOf("int", StringComparison.OrdinalIgnoreCase) >= 0) return IntegerDataTypeId;
+        return StringDataTypeId;
+    }
+
+    /// <summary>Возвращает готовый xmi.id либо детерминированно вычисленный, если он не задан.</summary>
+    /// <param name="id">Значение идентификатора из модели выгрузки.</param>
+    /// <param name="fallbackKey">Ключ для детерминированной подстановки.</param>
+    /// <returns>Корректный для XMI идентификатор вида EAID_XXXXXXXX.</returns>
+    private static string ModelId(string id, string fallbackKey)
+    {
+        return string.IsNullOrWhiteSpace(id)
+            ? XmiSupport.FormatEaId(XmiSupport.CreateDeterministicGuid(fallbackKey ?? "unknown"))
+            : id;
     }
 }
 

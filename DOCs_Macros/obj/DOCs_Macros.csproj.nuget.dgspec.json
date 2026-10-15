@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\DOCs_Macros.csproj": {}
+    "c:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\DOCs_Macros.csproj": {}
   },
   "projects": {
-    "C:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\DOCs_Macros.csproj": {
+    "c:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\DOCs_Macros.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\DOCs_Macros.csproj",
+        "projectUniqueName": "c:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\DOCs_Macros.csproj",
         "projectName": "DOCs_Macros",
-        "projectPath": "C:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\DOCs_Macros.csproj",
+        "projectPath": "c:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\DOCs_Macros.csproj",
         "packagesPath": "C:\\Users\\Aseev\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\obj\\",
+        "outputPath": "c:\\Users\\Aseev\\VS Code Projects\\DOCs Macros\\DOCs_Macros\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\Aseev\\AppData\\Roaming\\NuGet\\NuGet.Config",
@@ -47,7 +47,7 @@
         "net472": {
           "framework": "net472",
           "targetAlias": "net472",
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.401\\RuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.402\\RuntimeIdentifierGraph.json"
         }
       },
       "runtimes": {
