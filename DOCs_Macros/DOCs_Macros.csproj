@@ -29,6 +29,8 @@
   <!-- 6. ПОДКЛЮЧЕНИЕ ВСЕХ БИБЛИОТЕК ИЗ ПАПКИ T-FLEX DOCS -->
   <ItemGroup>
     <Reference Include="Microsoft.CSharp" />
+    <!-- Буфер обмена Windows: используется для копирования сформированного Markdown-отчёта -->
+    <Reference Include="System.Windows.Forms" />
     <!-- Захватываем абсолютно все .dll файлы из каталога программы, 
          но исключаем старый дубликат SolidEdge (Interop.SolidEdgeConstants.dll), чтобы убрать спам в логе -->
     <Reference Include="$(TFlexPath)\*.dll" Exclude="$(TFlexPath)\Interop.SolidEdgeConstants.dll">
