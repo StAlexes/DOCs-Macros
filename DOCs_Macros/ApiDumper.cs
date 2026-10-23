@@ -9,6 +9,27 @@ using System.Xml.Linq;
 
 public class ApiDumper
 {
+    /// <summary>
+    /// Флаг глубокой очистки шума для RAG-индексации.
+    /// true  — дополнительно отсекает внутренние сериализаторы настроек, типы подсистемы
+    ///         обмена данными и избыточные перегрузки, различающиеся только CancellationToken.
+    /// false — выгружает полный снимок сборок без дополнительной фильтрации.
+    /// Базовые фильтры (служебные члены, skippedNamespaces, суффиксы имён) действуют
+    /// в обоих режимах: флаг управляет только дополнительной очисткой.
+    /// </summary>
+    public static bool CleanRagNoise = true;
+
+    /// <summary>
+    /// Дополнительные шумовые пространства имён, отсекаемые только при CleanRagNoise == true.
+    /// Это внутренние настройки конфигуратора, сериализаторы пакетов обмена и слой
+    /// совместимости: прикладного API, пригодного для генерации кода макроязыка, в них нет.
+    /// </summary>
+    private static readonly string[] AdditionalNoiseNamespaces = {
+        "TFlex.DOCs.Model.Configuration.ControlSettings",
+        "TFlex.DOCs.Model.DataExchange.Settings.Serialization",
+        "TFlex.DOCs.Model.Configuration.Compatibility"
+    };
+
     public static void ExportTFlexApiToMarkdown()
     {
         Console.WriteLine("=== ГЕНЕРАЦИЯ СПРАВОЧНИКА API ИЗ DLL ===");
@@ -24,6 +45,12 @@ public class ApiDumper
         }
 
         // Точный перечень DLL, которые нужно обработать (можно закомментировать и использовать поиск по шаблону)
+        // Ядро API данных: TFlex.DOCs.Model.dll содержит не только типы пространства имён
+        // TFlex.DOCs.Model, но и кластер справочников TFlex.DOCs.Model.References.*
+        // (Reference, ReferenceObject, FileReferenceObject, LoadSettings и др.).
+        // Отдельной сборки TFlex.DOCs.Model.References.dll в поставке T-FLEX DOCs 18 нет —
+        // в списке она оставлена на случай других редакций/версий, а отсутствующие сборки
+        // не прерывают выгрузку.
         string[] targetAssemblies = {
             "TFlex.DOCs.Model.dll",
             "TFlex.DOCs.Common.dll",
@@ -36,9 +63,13 @@ public class ApiDumper
         //     .Select(Path.GetFileName)
         //     .ToArray();
 
+        // Служебные члены, не несущие прикладной нагрузки в справочнике API.
+        // BeginInvoke/EndInvoke — методы, которые компилятор генерирует для делегатов;
+        // они не являются частью ручного API и только засоряют векторный поиск RAG.
         string[] ignoredMethods = { 
             "Equals", "GetHashCode", "GetType", "ToString", "MemberwiseClone", 
-            "ReferenceEquals", "InitializeLifetimeService", "Dispose", "Clone" 
+            "ReferenceEquals", "InitializeLifetimeService", "Dispose", "Clone",
+            "BeginInvoke", "EndInvoke"
         };
 
         // Служебные пространства имён, засоряющие векторный поиск RAG: логирование,
@@ -55,14 +86,21 @@ public class ApiDumper
 
         var sb = new StringBuilder();
         sb.AppendLine("# Справочник API T-FLEX DOCs (с пространствами имён)");
-        sb.AppendLine("> Используй указанные `Namespace` для добавления в `using`. Пометка [RU: …] — русскоязычный алиас метода или свойства, найденный зеркалированием по идентичному тексту `<summary>` в XML-документации; [has Async] — наличие асинхронной версии; [RU only] — член, существующий только в русскоязычном алиасе.\n");
+        sb.AppendLine("> Используй указанные `Namespace` для добавления в `using`. Строка `**Уровень API:**` отделяет прикладной Macro DSL (доступно внутри MacroProvider) от низкоуровневого Core Open API. Пометка [RU: …] — русскоязычный алиас метода или свойства, найденный зеркалированием по идентичному тексту `<summary>` в XML-документации; [RU only] — член, существующий только в русскоязычном алиасе; [унаследовано] — член, полученный от базового класса коллекции макромодели. Методы описываются отдельными секциями `#### [Method]` со строками `**Алиасы:**`, `**RU only**` и `**Async**`.\n");
 
         int totalTypes = 0;
 
         foreach (var dllName in targetAssemblies)
         {
             string fullPath = Path.Combine(tflexFolder, dllName);
-            if (!File.Exists(fullPath)) continue;
+
+            // Отсутствующая сборка пропускается, но обязательно попадает в журнал:
+            // молчаливый пропуск ранее скрывал, что запрошенного файла нет в поставке.
+            if (!File.Exists(fullPath))
+            {
+                Console.WriteLine($" [Пропуск] Сборка не найдена: {dllName}");
+                continue;
+            }
 
             // 3. ПАРНЫЙ XML-ФАЙЛ ДОКУМЕНТАЦИИ (TFlex.DOCs.Model.xml рядом с TFlex.DOCs.Model.dll).
             //    Если XML нет — дамп продолжает штатную работу, формируя сигнатуры без описаний.
@@ -84,6 +122,17 @@ public class ApiDumper
                 var types = asm.GetExportedTypes()
                     .Where(t => t.IsPublic && (t.IsClass || t.IsInterface))
                     .Where(t => !skippedNamespaces.Any(ns => t.Namespace != null && (t.Namespace == ns || t.Namespace.StartsWith(ns + "."))))
+                    // Очистка шума (только при CleanRagNoise): внутренние настройки конфигуратора,
+                    // сериализаторы пакетов обмена и слой совместимости. Отсекается и само
+                    // пространство имён, и все вложенные в него.
+                    .Where(t => !CleanRagNoise || t.Namespace == null || !AdditionalNoiseNamespaces.Any(ns => t.Namespace == ns || t.Namespace.StartsWith(ns + ".")))
+                    // Типы подсистемы обмена данными (DataExchange*) — это преимущественно DTO-модели
+                    // и служебные описатели: 113 типов, из которых XML-описание есть лишь у 13.
+                    // Единственная точка входа, реально нужная для генерации кода макроязыка, —
+                    // DataExchangeGateway; она сохраняется намеренно.
+                    // ВНИМАНИЕ: суффикс "Settings" отсекать нельзя — вместе с настройками обмена
+                    // под фильтр попал бы прикладной TFlex.DOCs.Model.References.LoadSettings.
+                    .Where(t => !CleanRagNoise || !t.Name.StartsWith("DataExchange") || t.Name == "DataExchangeGateway")
                     .Where(t => !t.Name.EndsWith("EventArgs") && 
                                 !t.Name.EndsWith("EventHandler") && 
                                 !t.Name.EndsWith("Exception") &&
@@ -129,6 +178,12 @@ public class ApiDumper
                     foreach (var p in allProps)
                     {
                         bool isCyrillic = Regex.IsMatch(p.Name, @"\p{IsCyrillic}");
+
+                        // Русский алиас уже показан в строке латинского свойства как [RU: ...].
+                        // Отдельной строкой его выводить не нужно.
+                        if (isCyrillic && aliasOwner.ContainsKey(p))
+                            continue;
+
                         PropertyInfo ruMatch;
                         propMirrors.TryGetValue(p, out ruMatch);
 
@@ -143,105 +198,139 @@ public class ApiDumper
                             note = ruMatch != null ? $" [RU: {ruMatch.Name}]" : "";
                         }
 
+                        // Параметры индексатора являются частью сигнатуры свойства и не должны теряться в RAG-дампе.
+                        string propName = BuildPropertySignature(p);
+
                         string propSummary = xmlDoc.GetPropertySummary(p);
                         propLines.Add(new PropEntry
                         {
                             TypeName = FormatTypeName(p.PropertyType),
-                            Name = p.Name,
+                            Name = propName,
                             RuNote = note,
                             DocNote = string.IsNullOrEmpty(propSummary) ? "" : $" — {propSummary}"
                         });
                     }
+
+                    // ГАРАНТИРОВАННЫЙ ВЫВОД ЧЛЕНОВ КОЛЛЕКЦИЙ МАКРОМОДЕЛИ.
+                    // У списков макромодели (RefObjList, Объекты и им подобных) индексатор
+                    // Item[...] и счётчик Count объявлены в базовом generic-классе
+                    // (ObjectAccessorList<T>), поэтому выборка DeclaredOnly их не возвращает,
+                    // и в справочнике пропадали ключевые способы доступа к элементам коллекции.
+                    // Тип свойства при этом уже подставлен конструированным generic-аргументом
+                    // базового типа (например, T → RefObj), поэтому повторного разбора generic
+                    // не требуется.
+                    if (IsMacroDslType(type))
+                        AddInheritedCollectionMembers(type, allProps, propLines, xmlDoc);
 
                     // 2. Методы
                     var allMethods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
                         .Where(m => !m.IsSpecialName && !ignoredMethods.Contains(m.Name))
                         .ToList();
 
-                    var ruMethods = allMethods.Where(m => Regex.IsMatch(m.Name, @"\p{IsCyrillic}")).ToList();
-                    var engMethods = allMethods.Where(m => !Regex.IsMatch(m.Name, @"\p{IsCyrillic}") && !m.Name.EndsWith("Async"))
-                        .GroupBy(m => m.Name)
+                    // Очистка шума (только при CleanRagNoise): убираются избыточные перегрузки,
+                    // отличающиеся от соседнего метода исключительно завершающим CancellationToken.
+                    // Метод, существующий ТОЛЬКО с токеном отмены, сохраняется — иначе из справочника
+                    // пропал бы единственный способ вызова (например, Prepare(..., token)).
+                    if (CleanRagNoise)
+                        allMethods = FilterRedundantCancellationTokens(allMethods);
+
+                    // Кириллические методы сразу упорядочиваются по числу параметров:
+                    // на этот порядок опирается ранний выход в FindMirroredMethod.
+                    // Методы с недоступными метаданными уводятся в конец списка.
+                    var ruMethods = allMethods
+                        .Where(m => Regex.IsMatch(m.Name, @"\p{IsCyrillic}"))
+                        .OrderBy(m =>
+                        {
+                            try { return m.GetParameters().Length; }
+                            catch (Exception) { return int.MaxValue; }
+                        })
                         .ToList();
 
-                    var methodLines = new List<string>();
+                    // Каждая перегрузка выводится отдельной записью: прежняя группировка
+                    // по имени склеивала перегрузки в одну строку с маркером (+N) и отбрасывала
+                    // сигнатуры, из-за чего векторный поиск не находил конкретные варианты вызова.
+                    var methodEntries = new List<MethodEntry>();
 
                     // Кириллические методы, уже использованные как алиасы латинских методов.
-                    // Нужно, чтобы во втором проходе вывести только «осиротевшие» кириллические
-                    // методы и не продублировать те, что уже показаны в строке латинского метода.
+                    // Во втором проходе выводятся только «осиротевшие» кириллические методы,
+                    // чтобы уже показанный алиас не превратился в отдельную строку [RU only].
                     var matchedRuMethods = new HashSet<MethodInfo>();
 
-                    foreach (var group in engMethods)
+                    // ПЕРВЫЙ ПРОХОД: латинские методы. Async-методы тоже включаются —
+                    // иначе поиск по RunAsync никогда не найдёт описание.
+                    foreach (var method in allMethods
+                        .Where(m => !Regex.IsMatch(m.Name, @"\p{IsCyrillic}"))
+                        .OrderBy(m => m.Name)
+                        .ThenBy(m => m.GetParameters().Length))
                     {
-                        string methodName = group.Key;
-                        bool hasAsync = allMethods.Any(m => m.Name == methodName + "Async");
-                        string asyncNote = hasAsync ? " [has Async]" : "";
+                        string summary = xmlDoc.GetMethodSummary(method);
 
-                        var best = group.OrderByDescending(m => m.GetParameters().Length).First();
-                        var overloadsNote = group.Count() > 1 ? $" (+{group.Count() - 1})" : "";
+                        // Русскоязычный алиас ищется строго по идентичному тексту <summary>
+                        // и совпадающей арности; закреплённый ранее алиас повторно не занимается.
+                        var ruMatch = FindMirroredMethod(ruMethods, method, summary, xmlDoc);
+                        if (ruMatch != null && matchedRuMethods.Contains(ruMatch))
+                            ruMatch = null;
 
-                        // Описание метода из парного XML-файла документации (с fallback по перегрузкам)
-                        string methodSummary = xmlDoc.GetMethodSummary(best);
-
-                        // Русскоязычный алиас метода ищется строго по идентичному тексту <summary>
-                        // и совпадающей арности — случайная длина параметров больше не используется.
-                        var ruMatch = FindMirroredMethod(ruMethods, best, methodSummary, xmlDoc);
-                        string ruNote = "";
                         if (ruMatch != null)
-                        {
-                            ruNote = $" [RU: {ruMatch.Name}]";
-
-                            // Алиас закреплён за латинским методом: во втором проходе он
-                            // уже не должен выводиться как самостоятельный [RU only].
                             matchedRuMethods.Add(ruMatch);
-                        }
 
-                        // Сигнатура строится через FormatTypeName: устраняются артефакты
-                        // рефлексии вида List`1, Nullable`1 и корректно печатается void.
-                        string paramsList = string.Join(", ", best.GetParameters().Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}"));
-                        string methodSig = $"{FormatTypeName(best.ReturnType)} {best.Name}({paramsList}){overloadsNote}";
-
-                        string docNote = string.IsNullOrEmpty(methodSummary) ? "" : $" — {methodSummary}";
-
-                        methodLines.Add($"- `{methodSig}`{asyncNote}{ruNote}{docNote}");
+                        methodEntries.Add(BuildMethodEntry(
+                            type,
+                            method,
+                            summary,
+                            ruMatch != null ? ruMatch.Name : null,
+                            false));
                     }
 
                     // ВТОРОЙ ПРОХОД: самостоятельные кириллические методы.
-                    // Прежняя версия обходила только коллекцию engMethods, поэтому у чисто
-                    // кириллических классов макроязыка (ДиалогВвода, Объект, Подключение,
-                    // ДиалогВыбораОбъектов и т.п.) коллекция engMethods пуста и секция
-                    // «**Методы:**» не генерировалась вовсе — методы терялись безвозвратно.
-                    // Сюда же попадают методы двуязычных классов, объявленные исключительно
-                    // на русском языке и не нашедшие латинской пары по тексту <summary>.
-                    // Все они выводятся с маркером [RU only], чтобы русскоязычный API
-                    // макроязыка сохранялся в справочнике полностью.
+                    // Сюда гарантированно попадают ВСЕ методы чисто кириллических классов
+                    // макроязыка (ДиалогВвода, Объект, Подключение, ДиалогВыбораОбъектов и т.п.),
+                    // у которых латинских методов нет вовсе, а также русскоязычные члены
+                    // двуязычных классов, не нашедшие латинской пары по тексту <summary>.
+                    // Порядок сортировки: кириллица по алфавиту — это осмысленная группировка
+                    // только для своей языковой ветви, латиница сортируется отдельно выше.
                     var remainingRuMethods = ruMethods
-                        .Where(m => !matchedRuMethods.Contains(m) && !m.Name.EndsWith("Async"))
-                        .GroupBy(m => m.Name)
-                        .OrderBy(g => g.Key)
+                        .Where(m => !matchedRuMethods.Contains(m))
+                        .OrderBy(m => m.Name, StringComparer.CurrentCulture)
+                        .ThenBy(m => m.GetParameters().Length)
                         .ToList();
 
-                    foreach (var group in remainingRuMethods)
+                    foreach (var method in remainingRuMethods)
                     {
-                        string methodName = group.Key;
-                        bool hasAsync = allMethods.Any(m => m.Name == methodName + "Async");
-                        string asyncNote = hasAsync ? " [has Async]" : "";
-
-                        var best = group.OrderByDescending(m => m.GetParameters().Length).First();
-                        var overloadsNote = group.Count() > 1 ? $" (+{group.Count() - 1})" : "";
-
-                        string methodSummary = xmlDoc.GetMethodSummary(best);
-                        string docNote = string.IsNullOrEmpty(methodSummary) ? "" : $" — {methodSummary}";
-
-                        string paramsList = string.Join(", ", best.GetParameters().Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}"));
-                        string methodSig = $"{FormatTypeName(best.ReturnType)} {best.Name}({paramsList}){overloadsNote}";
-
-                        methodLines.Add($"- `{methodSig}`{asyncNote} [RU only]{docNote}");
+                        methodEntries.Add(BuildMethodEntry(
+                            type,
+                            method,
+                            xmlDoc.GetMethodSummary(method),
+                            null,
+                            true));
                     }
 
                     // Описание типа (класса/интерфейса) из парного XML-файла документации
                     string typeSummary = xmlDoc.GetTypeSummary(type);
 
-                    if (!propLines.Any() && !methodLines.Any()) continue;
+                    // Редкие артефакты рефлексии: сборка может вернуть два полностью идентичных
+                    // MethodInfo (одинаковые сигнатура, описание и параметры). Такие записи
+                    // неразличимы для читателя и для индекса RAG, поэтому дубликаты убираются.
+                    var seenSignatures = new HashSet<string>();
+                    methodEntries = methodEntries
+                        .Where(e => seenSignatures.Add(e.Signature + "\u0000" + e.Summary))
+                        .ToList();
+
+                    // Оставшиеся коллизии — методы, различающиеся ТОЛЬКО возвращаемым типом
+                    // (в IL это допустимо, в C#-коде невозможно). Полное имя уточняется
+                    // возвращаемым типом, чтобы ключ оставался уникальным.
+                    var fullNameCounts = new Dictionary<string, int>();
+                    foreach (var e in methodEntries)
+                    {
+                        int c;
+                        fullNameCounts.TryGetValue(e.FullName, out c);
+                        fullNameCounts[e.FullName] = c + 1;
+                    }
+
+                    foreach (var e in methodEntries.Where(e => fullNameCounts[e.FullName] > 1))
+                        e.FullName = $"{e.FullName} -> {e.ReturnType}";
+
+                    if (!propLines.Any() && !methodEntries.Any()) continue;
 
                     // САМОДОСТОЯТЕЛЬНАЯ ШАПКА БЛОКА: полное имя типа, пространство имён и сборка
                     // дублируются в каждом блоке, чтобы сплиттеры RAG не теряли контекст фрагмента.
@@ -249,6 +338,13 @@ public class ApiDumper
                     sb.AppendLine($"### [Type] {type.FullName}");
                     sb.AppendLine($"- **Namespace:** `{ns}`");
                     sb.AppendLine($"- **Assembly:** `{dllName}`");
+
+                    // Явно отделяем прикладной Macro DSL от низкоуровневого Core Open API.
+                    string apiLevel = IsMacroDslType(type)
+                        ? "Macro DSL (доступно внутри MacroProvider)"
+                        : "Core Open API";
+                    sb.AppendLine($"- **Уровень API:** {apiLevel}");
+
                     if (!string.IsNullOrEmpty(typeSummary))
                         sb.AppendLine($"- **Описание:** {typeSummary}");
                     sb.AppendLine();
@@ -261,10 +357,36 @@ public class ApiDumper
                         sb.AppendLine();
                     }
 
-                    if (methodLines.Any())
+                    if (methodEntries.Any())
                     {
-                        sb.AppendLine("**Методы:**");
-                        foreach (var m in methodLines) sb.AppendLine(m);
+                        foreach (var m in methodEntries)
+                        {
+                            // H4 важен: parse() закрывает секцию на заголовке,
+                            // поэтому каждый метод станет отдельным чанком.
+                            sb.AppendLine($"#### [Method] `{m.Signature}`");
+                            sb.AppendLine($"- **Полное имя:** `{m.FullName}`");
+
+                            if (!string.IsNullOrEmpty(m.Summary))
+                                sb.AppendLine($"- **Описание:** {m.Summary}");
+
+                            if (m.Parameters.Any())
+                            {
+                                sb.AppendLine("- **Параметры:**");
+                                foreach (var p in m.Parameters)
+                                    sb.AppendLine($"  - `{p}`");
+                            }
+
+                            if (!string.IsNullOrEmpty(m.Alias))
+                                sb.AppendLine($"- **Алиасы:** `{m.Alias}`");
+
+                            if (m.RuOnly)
+                                sb.AppendLine("- **RU only**");
+
+                            if (m.IsAsync)
+                                sb.AppendLine("- **Async**");
+
+                            sb.AppendLine();
+                        }
                     }
                     sb.AppendLine();
                     addedForDll++;
@@ -282,9 +404,158 @@ public class ApiDumper
         string projectDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", ".."));
         string outPath = Path.Combine(projectDir, "tflex_docs_api_smart.md");
 
-        File.WriteAllText(outPath, sb.ToString(), Encoding.UTF8);
+        // BOM намеренно не записывается: новейший UTF8Encoding без флага
+        // encoderShouldEmitUTF8Identifier не добавляет байты EF BB BF в начало файла.
+        // Генератор не должен искусственно создавать проблему: лишний BOM ломает
+        // заголовки Markdown, идущие первой строкой, в части инструментов RAG-пайплайна.
+        File.WriteAllText(
+            outPath,
+            sb.ToString(),
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+        );
         Console.WriteLine($"\n Готово! Всего классов: {totalTypes}");
+        Console.WriteLine($" Режим очистки шума (CleanRagNoise): {CleanRagNoise}");
         Console.WriteLine($" Файл сохранён: {outPath}");
+    }
+
+    /// <summary>
+    /// Исключает перегрузки, отличающиеся от другого метода этого же типа только
+    /// завершающим параметром CancellationToken.
+    ///
+    /// Ключевое требование безопасности: методы, существующие ТОЛЬКО с токеном отмены,
+    /// сохраняются. Перегрузка отсекается лишь тогда, когда рядом уже есть полностью
+    /// совпадающая по имени и предшествующим параметрам версия без токена. Иначе
+    /// из справочника исчез бы единственный способ вызова (например, Prepare(..., token))
+    /// вместе с его описанием из XML-документации.
+    /// </summary>
+    /// <param name="methods">Полный список методов типа, полученный через Reflection.</param>
+    /// <returns>Список без избыточных токен-перегрузок в исходном порядке следования.</returns>
+    private static List<MethodInfo> FilterRedundantCancellationTokens(List<MethodInfo> methods)
+    {
+        var result = new List<MethodInfo>(methods.Count);
+
+        foreach (var method in methods)
+        {
+            if (HasRedundantCancellationToken(method, methods))
+                continue;
+
+            result.Add(method);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Проверяет, есть ли в наборе метод с тем же именем и идентичными типами параметров,
+    /// но без завершающего CancellationToken. Наличие такой версии делает текущую
+    /// перегрузку избыточной для справочника RAG.
+    /// </summary>
+    /// <param name="method">Проверяемая перегрузка.</param>
+    /// <param name="methods">Все методы типа, среди которых ищется упрощённая версия.</param>
+    /// <returns>true, если перегрузка дублирует версию без токена отмены.</returns>
+    private static bool HasRedundantCancellationToken(MethodInfo method, List<MethodInfo> methods)
+    {
+        ParameterInfo[] parameters;
+
+        // Метаданные конкретной перегрузки могут быть недоступны (например, из-за
+        // отсутствующей зависимости). В этом случае метод НЕ отсекается.
+        try
+        {
+            parameters = method.GetParameters();
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+
+        // Токен учитывается только в последней позиции: именно вариация "метод + token"
+        // является распространённым шумом асинхронных API.
+        if (parameters.Length == 0 || !IsCancellationToken(parameters[parameters.Length - 1].ParameterType))
+            return false;
+
+        int expectedCount = parameters.Length - 1;
+
+        foreach (var candidate in methods)
+        {
+            if (ReferenceEquals(candidate, method) || candidate.Name != method.Name)
+                continue;
+
+            ParameterInfo[] candidateParameters;
+
+            try
+            {
+                candidateParameters = candidate.GetParameters();
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+
+            if (candidateParameters.Length != expectedCount)
+                continue;
+
+            // Все параметры, кроме завершающего токена, должны совпадать по типам и порядку.
+            bool same = true;
+            for (int i = 0; i < expectedCount; i++)
+            {
+                // Если у кандидата на этом месте тоже токен, он не является упрощённой версией.
+                if (IsCancellationToken(candidateParameters[i].ParameterType))
+                {
+                    same = false;
+                    break;
+                }
+
+                if (!string.Equals(GetTypeSignature(candidateParameters[i].ParameterType), GetTypeSignature(parameters[i].ParameterType), StringComparison.Ordinal))
+                {
+                    same = false;
+                    break;
+                }
+            }
+
+            if (same)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Возвращает текстовую подпись типа для сравнения сигнатур перегрузок.
+    ///
+    /// Сравнение через Type-идентичность здесь неприменимо: у каждого generic-метода
+    /// собственный экземпляр типа-параметра (T в RunWithSaveSet&lt;T&gt;(...) и в
+    /// RunWithSaveSet&lt;T&gt;(..., token) — это два разных объекта Type), а в поставке
+    /// T-FLEX встречаются одноимённые типы из разных сборок. Текстовая подпись
+    /// (FullName, а для generic-параметров — их краткое имя) даёт устойчивое сравнение.
+    /// </summary>
+    private static string GetTypeSignature(Type type)
+    {
+        if (type == null)
+            return string.Empty;
+
+        // Для параметра generic-метода FullName равен null — используется краткое имя ("T").
+        return type.FullName ?? type.Name;
+    }
+
+    /// <summary>
+    /// Определяет, является ли тип токеном отмены. Сравнение идёт по имени типа,
+    /// а не только по строгому равенству: в поставке T-FLEX могут оказаться
+    /// несовместимые копии System.Threading.CancellationToken из разных сборок.
+    /// </summary>
+    private static bool IsCancellationToken(Type parameterType)
+    {
+        if (parameterType == null)
+            return false;
+
+        if (parameterType.FullName == "System.Threading.CancellationToken")
+            return true;
+
+        // Nullable&lt;CancellationToken&gt; и прочие копии типа из другой сборки.
+        Type underlying = Nullable.GetUnderlyingType(parameterType);
+        if (underlying != null && underlying.FullName == "System.Threading.CancellationToken")
+            return true;
+
+        return parameterType.Name == "CancellationToken";
     }
 
     /// <summary>
@@ -306,6 +577,227 @@ public class ApiDumper
 
         /// <summary>Описание из тега summary XML-документации: " — текст" либо пусто.</summary>
         public string DocNote;
+    }
+
+    /// <summary>
+    /// Элемент отдельного метода класса для итогового Markdown.
+    ///
+    /// В отличие от прежнего строкового представления, каждая перегрузка метода
+    /// (и каждый async-вариант) хранится самостоятельной записью: это позволяет
+    /// вывести метод отдельной секцией H4 и тем самым превратить его в отдельный
+    /// чанк при разборе справочника RAG-конвейером.
+    /// </summary>
+    private sealed class MethodEntry
+    {
+        /// <summary>Читаемая сигнатура: "RefObj FindObject(string referenceName, ...)".</summary>
+        public string Signature;
+
+        /// <summary>Полное имя метода с типами параметров для точного поиска и дедупликации.</summary>
+        public string FullName;
+
+        /// <summary>Описание из тега summary XML-документации; пусто, если описания нет.</summary>
+        public string Summary;
+
+        /// <summary>Имя русскоязычного алиаса, найденного зеркалированием по summary; иначе null.</summary>
+        public string Alias;
+
+        /// <summary>Список параметров в виде "string referenceName" для построчного вывода.</summary>
+        public List<string> Parameters;
+
+        /// <summary>Признак метода, существующего только в русскоязычном API (маркер «RU only»).</summary>
+        public bool RuOnly;
+
+        /// <summary>Признак асинхронного варианта метода (суффикс Async).</summary>
+        public bool IsAsync;
+
+        /// <summary>Нормализованное имя возвращаемого типа — для различения метаданных-коллизий.</summary>
+        public string ReturnType;
+    }
+
+    /// <summary>
+    /// Формирует запись метода для вывода: нормализует типы через FormatTypeName
+    /// (устраняя артефакты рефлексии вида List`1, Nullable`1 и корректно печатая void),
+    /// раздельно собирает читаемую сигнатуру, полное имя с типами параметров,
+    /// список параметров и признаки алиаса/RU only/Async.
+    /// </summary>
+    /// <param name="type">Объявляющий тип — используется для полного имени метода.</param>
+    /// <param name="method">Метод, полученный через Reflection.</param>
+    /// <param name="summary">Описание метода из XML-документации (может быть пустым).</param>
+    /// <param name="alias">Имя русскоязычного алиаса либо null, если алиас не найден.</param>
+    /// <param name="ruOnly">true, если метод существует только в русскоязычном API.</param>
+    /// <returns>Готовая запись метода для последующего вывода.</returns>
+    private static MethodEntry BuildMethodEntry(
+        Type type,
+        MethodInfo method,
+        string summary,
+        string alias,
+        bool ruOnly)
+    {
+        var parameters = method.GetParameters()
+            .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}")
+            .ToList();
+
+        // Полное имя типа экранируется от обратной кавычки: арность generic-типа
+        // записывается в метаданных как `1/`2, а внутри Markdown-строки, обрамлённой
+        // обратными кавычками, такой символ обрывает code-span и ломает разметку.
+        // Кавычка-арности заменяется апострофом: List`1 → List'1.
+        string typeName = (type.FullName ?? type.Name).Replace('`', '\'');
+
+        string parameterTypes = string.Join(
+            ", ",
+            method.GetParameters().Select(p => FormatTypeName(p.ParameterType)));
+
+        return new MethodEntry
+        {
+            Signature = $"{FormatTypeName(method.ReturnType)} {method.Name}(" +
+                        $"{string.Join(", ", parameters)})",
+            FullName = $"{typeName}.{method.Name}({parameterTypes})",
+            Summary = summary,
+            Alias = alias,
+            Parameters = parameters,
+            RuOnly = ruOnly,
+            IsAsync = method.Name.EndsWith("Async", StringComparison.Ordinal),
+            ReturnType = FormatTypeName(method.ReturnType)
+        };
+    }
+
+    /// <summary>
+    /// Определяет, относится ли тип к высокоуровневой макромодели (Macro DSL)
+    /// или к низкоуровневому Core Open API платформы.
+    /// </summary>
+    private static bool IsMacroDslType(Type type)
+    {
+        if (type == null) return false;
+
+        string ns = type.Namespace ?? "";
+        if (ns.StartsWith("TFlex.DOCs.Model.Macros", StringComparison.Ordinal))
+            return true;
+
+        if (type.Name == "MacroProvider" || type.Name == "RefObj" || type.Name == "Объект" ||
+            type.Name == "Подключение" || type.Name == "ДиалогВвода" || type.Name == "Объекты")
+            return true;
+
+        for (Type baseType = type.BaseType; baseType != null; baseType = baseType.BaseType)
+        {
+            if (baseType.Name == "MacroProvider" || baseType.Name == "ObjectAccessor")
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Формирует сигнатуру свойства для справочника API.
+    ///
+    /// Для обычного свойства возвращается его имя. Для свойства-индексатора
+    /// (например, Item[string parameter] у ParameterAccessor или Item[int index]
+    /// у коллекций макромодели) в квадратных скобках добавляются параметры
+    /// индексации с типами: без этого RAG не сможет отличить индексатор
+    /// от обычного свойства и потеряет способ обращения к элементу.
+    /// </summary>
+    /// <param name="property">Свойство, полученное через Reflection.</param>
+    /// <returns>Имя свойства либо "Имя[тип параметр, ...]" для индексатора.</returns>
+    private static string BuildPropertySignature(PropertyInfo property)
+    {
+        if (property == null)
+            return string.Empty;
+
+        ParameterInfo[] indexParams;
+        try
+        {
+            indexParams = property.GetIndexParameters();
+        }
+        catch (Exception)
+        {
+            // Метаданные индексатора могут быть недоступны (например, из-за
+            // отсутствующей зависимости): свойство выводится как обычное.
+            indexParams = new ParameterInfo[0];
+        }
+
+        if (indexParams.Length == 0)
+            return property.Name;
+
+        string indexArgs = string.Join(", ", indexParams.Select(
+            ip => $"{FormatTypeName(ip.ParameterType)} {ip.Name}"));
+
+        return $"{property.Name}[{indexArgs}]";
+    }
+
+    /// <summary>
+    /// Дополняет список свойств типа унаследованными членами коллекций макромодели.
+    ///
+    /// Причина отдельного прохода: свойства собираются с флагом DeclaredOnly, поэтому
+    /// у списков макромодели (RefObjList, Объекты и их наследники) в справочник не
+    /// попадали унаследованные от ObjectAccessorList&lt;T&gt; индексатор Item[int] и
+    /// свойство Count — ключевые способы работы с коллекцией в макроязыке.
+    ///
+    /// Наследуются только члены коллекций: индексаторы и счётчик элементов. Прочие
+    /// унаследованные члены намеренно не подмешиваются, чтобы не дублировать в справочнике
+    /// десятки методов базовых типов и не размывать векторный поиск. Уже выведенные
+    /// собственные свойства повторно не добавляются.
+    /// </summary>
+    /// <param name="type">Описываемый тип макромодели.</param>
+    /// <param name="declaredProps">Свойства, собранные с флагом DeclaredOnly.</param>
+    /// <param name="propLines">Накопитель строк секции «Свойства» для текущего типа.</param>
+    /// <param name="xmlDoc">Поставщик XML-документации для поиска описаний.</param>
+    private static void AddInheritedCollectionMembers(
+        Type type,
+        List<PropertyInfo> declaredProps,
+        List<PropEntry> propLines,
+        XmlDocProvider xmlDoc)
+    {
+        if (type == null || declaredProps == null || propLines == null)
+            return;
+
+        // Индексатор и Count ищутся только среди public-свойств экземпляра.
+        // Свойства статики и непубличные члены для коллекции макроязыка несущественны.
+        const BindingFlags inheritedFlags =
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy;
+
+        // Имена собственных свойств нужны, чтобы не задваивать члены, которые
+        // переопределены в самом типе (Type.GetProperty вернул бы их повторно).
+        var declaredNames = new HashSet<string>(
+            declaredProps.Where(p => p != null).Select(p => p.Name));
+
+        // Уже попавшие в вывод сигнатуры: защита от повторной вставки, если тип
+        // переобъявляет члены базового класса с тем же именем и арностью.
+        var emitted = new HashSet<string>(propLines.Select(p => p.Name));
+
+        foreach (var memberName in new[] { "Item", "Count" })
+        {
+            if (declaredNames.Contains(memberName))
+                continue;
+
+            PropertyInfo inherited;
+            try
+            {
+                inherited = type.GetProperty(memberName, inheritedFlags);
+            }
+            catch (Exception)
+            {
+                // Неоднозначный или недоступный член пропускается без прерывания выгрузки.
+                continue;
+            }
+
+            if (inherited == null)
+                continue;
+
+            string signature = BuildPropertySignature(inherited);
+            if (!emitted.Add(signature))
+                continue;
+
+            // Описание ищется по XML-документации: унаследованный член документирован
+            // в базовом типе, и XmlDocProvider корректно находит его по DeclaringType.
+            string summary = xmlDoc == null ? null : xmlDoc.GetPropertySummary(inherited);
+
+            propLines.Add(new PropEntry
+            {
+                TypeName = FormatTypeName(inherited.PropertyType),
+                Name = signature,
+                RuNote = " [унаследовано]",
+                DocNote = string.IsNullOrEmpty(summary) ? "" : $" — {summary}"
+            });
+        }
     }
 
     /// <summary>
@@ -572,6 +1064,9 @@ public class ApiDumper
 
         foreach (var ruMethod in ruMethods)
         {
+            // Арность кандидата обёрнута в try/catch: у некоторых типов метаданные
+            // недоступны (например, сборка подгружена частично), и GetParameters()
+            // бросает исключение. Такой кандидат пропускается, выгрузка продолжается.
             int ruParamCount;
             try
             {
@@ -584,7 +1079,21 @@ public class ApiDumper
 
             if (ruParamCount != latinParamCount) continue;
 
-            string ruSummary = xmlDoc.GetMethodSummary(ruMethod);
+            // Кандидаты упорядочены по числу параметров, поэтому после прохода
+            // всех методов с совпадающей арностью дальнейший поиск бессмыслен:
+            // методы с другим числом параметров алиасами быть не могут.
+            if (ruParamCount > latinParamCount) break;
+
+            string ruSummary;
+            try
+            {
+                ruSummary = xmlDoc.GetMethodSummary(ruMethod);
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+
             if (string.IsNullOrEmpty(ruSummary)) continue;
 
             if (string.Equals(ruSummary, latinSummary, StringComparison.Ordinal))
