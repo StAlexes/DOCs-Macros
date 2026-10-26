@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using System.Xml.Linq;
 
 public class ApiDumper
@@ -28,6 +29,46 @@ public class ApiDumper
         "TFlex.DOCs.Model.Configuration.ControlSettings",
         "TFlex.DOCs.Model.DataExchange.Settings.Serialization",
         "TFlex.DOCs.Model.Configuration.Compatibility"
+    };
+
+    /// <summary>
+    /// Курируемая карта сценариев генерации модели данных — «точек входа» API.
+    ///
+    /// Причина появления секции: методы и типы, собирающие модель данных
+    /// (CreateReferenceBuilder, ClassObjectBuilder и т.п.), описываются в XML-документации
+    /// метафорами «Создает экземпляр класса для создания типа» и не содержат ни слова
+    /// «справочник». Векторный поиск по живому запросу «Создать справочник» такие записи
+    /// не находит: их приходилось искать точной строкой сигнатуры.
+    /// Секция перечисляет сценарий и точную пару «тип + метод», что даёт RAG
+    /// лексический и семантический якорь на естественных формулировках задачи.
+    /// </summary>
+    private static readonly string[] EntryPointScenarios = {
+        "## Сценарии генерации модели данных (точки входа)",
+        "",
+        "Типовые задачи генерации и изменения модели данных и соответствующие им точки входа в API. Если запрос звучит как «создать справочник», «создать тип объектов», «добавить параметр» — начинай именно с этих членов.",
+        "",
+        "- **Создать справочник:** `TFlex.DOCs.Model.ReferenceCatalog.CreateReferenceBuilder(ReferenceCatalogFolder)` → настроить `ReferenceBuilder` → `ReferenceBuilder.Save(bool)`. Ключевые слова: создать справочник, новый справочник, генерация справочника, create reference.",
+        "- **Создать папку справочников:** `TFlex.DOCs.Model.ReferenceCatalog.CreateFolder(string, ReferenceCatalogFolder)`, `ReferenceCatalog.MoveFolder(...)`.",
+        "- **Найти существующий справочник:** `ReferenceCatalog.Find(string)`, `ReferenceCatalog.FindReference(string)`, `ReferenceCatalog.FindFolderByName(string)`.",
+        "- **Создать тип объектов:** `new TFlex.DOCs.Model.Structure.Builders.ClassObjectBuilder(ClassTree)` → `ClassObjectBuilder.Save()`. Ключевые слова: создать тип объектов, новый тип объектов, класс объектов, create class object, type builder.",
+        "- **Создать производный тип объектов:** `new ClassObjectBuilder(ClassTree, ClassObject baseType)` — тип, порождённый от указанного базового типа.",
+        "- **Изменить существующий тип объектов:** `new ClassObjectBuilder(ClassTree, ClassObject existingType)` → изменить свойства → `Save()`.",
+        "- **Создать группу параметров:** `new TFlex.DOCs.Model.Structure.Builders.ParameterGroupBuilder(ClassObjectBuilder)`. Ключевые слова: создать группу параметров, группа параметров, create parameter group.",
+        "- **Создать параметр справочника:** `TFlex.DOCs.Model.Structure.Builders.ParameterInfoBuildersFactory.CreateParameterInfoBuilder(...)`, `ParameterInfoBuilder`.",
+        "- **Задать условие уникальности:** `new TFlex.DOCs.Model.Structure.Builders.UniqueIndexBuilder(ClassObjectBuilder)`. Ключевые слова: условие уникальности, уникальный индекс, unique index.",
+        "- **Создать связь (ссылочное свойство) типа объектов:** `new TFlex.DOCs.Model.Structure.Builders.LinkGroupBuilder(ParameterGroup)`.",
+        "- **Ключевые слова для поиска сценариев:** создать, создание, добавить, новый, конструктор, сформировать, настроить, изменить, справочник, тип объектов, параметр, builder, factory, create, add, new, build, generate.",
+        ""
+    };
+
+    /// <summary>
+    /// Имена методов базовых builder-классов, которые подмешиваются в блок производного типа.
+    /// Ограничение списка намеренно: без него в справочник утекли бы десятки служебных
+    /// унаследованных членов и размыли бы векторный поиск.
+    /// </summary>
+    private static readonly string[] InheritedBuilderMemberNames = {
+        "Save", "SaveAsync", "Delete", "DeleteAsync", "Build", "Create", "Update",
+        "Validate", "Reload", "Load", "LoadAsync"
     };
 
     public static void ExportTFlexApiToMarkdown()
@@ -86,7 +127,14 @@ public class ApiDumper
 
         var sb = new StringBuilder();
         sb.AppendLine("# Справочник API T-FLEX DOCs (с пространствами имён)");
-        sb.AppendLine("> Используй указанные `Namespace` для добавления в `using`. Строка `**Уровень API:**` отделяет прикладной Macro DSL (доступно внутри MacroProvider) от низкоуровневого Core Open API. Пометка [RU: …] — русскоязычный алиас метода или свойства, найденный зеркалированием по идентичному тексту `<summary>` в XML-документации; [RU only] — член, существующий только в русскоязычном алиасе; [унаследовано] — член, полученный от базового класса коллекции макромодели. Методы описываются отдельными секциями `#### [Method]` со строками `**Алиасы:**`, `**RU only**` и `**Async**`.\n");
+        sb.AppendLine("> Используй указанные `Namespace` для добавления в `using`. Строка `**Уровень API:**` отделяет прикладной Macro DSL (доступно внутри MacroProvider) от низкоуровневого Core Open API; пометка `Core Open API (генерация модели данных)` — это типы-конструкторы (Builder/Factory), через которые собирается модель данных. Пометка [RU: …] — русскоязычный алиас метода или свойства, найденный зеркалированием по идентичному тексту `<summary>` в XML-документации; [RU only] — член, существующий только в русскоязычном алиасе; [унаследовано] — член, полученный от базового класса коллекции макромодели. Каждый метод выводится отдельной секцией `#### [Method]`, каждый конструктор — секцией `#### [Constructor]`; в чанке доступны строки `**Алиасы:**`, `**RU only**`, `**Async**`, `**Возвращает:**` (выводится только когда текст `<returns>` описывает результат, а не пересказывает summary), `**Назначение:**`, `**Ключевые слова:**`, `**Как получить:**`, `**Как получить (из кода):**`, `**Прямое создание:**` и `**Унаследовано от:**`.\n");
+
+        // Курируемые сценарии генерации модели данных — раньше говорящий запрос
+        // «Создать справочник» / «Создать тип объекта» не имел ни одной лексической точки
+        // опоры в справочнике: описания builder-типов сформулированы через «создает экземпляр
+        // класса», и векторный поиск не выводил их в топ.
+        foreach (var scenarioLine in EntryPointScenarios)
+            sb.AppendLine(scenarioLine);
 
         int totalTypes = 0;
 
@@ -133,23 +181,40 @@ public class ApiDumper
                     // ВНИМАНИЕ: суффикс "Settings" отсекать нельзя — вместе с настройками обмена
                     // под фильтр попал бы прикладной TFlex.DOCs.Model.References.LoadSettings.
                     .Where(t => !CleanRagNoise || !t.Name.StartsWith("DataExchange") || t.Name == "DataExchangeGateway")
-                    .Where(t => !t.Name.EndsWith("EventArgs") && 
-                                !t.Name.EndsWith("EventHandler") && 
+                    .Where(t => !t.Name.EndsWith("EventArgs") &&
+                                !t.Name.EndsWith("EventHandler") &&
                                 !t.Name.EndsWith("Exception") &&
-                                !t.Name.EndsWith("Collection") &&
-                                !t.Name.EndsWith("Description") &&
-                                !t.Name.EndsWith("Dto") &&
-                                !t.Name.EndsWith("Activity") &&
-                                !t.Name.Contains("Xml") &&
-                                !t.Name.Contains("Log") &&
-                                !t.Name.Contains("Enumerator") &&
-                                !t.Name.Contains("Internal") &&
-                                !t.Name.StartsWith("<"))
+                                // Типы-конструкторы (Builder/Factory) и их ВЛОЖЕННЫЕ типы
+                                // освобождаются от суффиксных фильтров целиком. Это ключевые
+                                // точки входа генерации модели данных: вложенный
+                                // ClassObjectBuilder.ClassObjectCollection отсекался по суффиксу
+                                // Collection, а ParameterGroupBuilder+ParameterGroupCollection
+                                // вместе с ним терял методы CanAddItem/CanRemoveItem.
+                                (IsBuilderRelatedType(t) ||
+                                 (!t.Name.EndsWith("Collection") &&
+                                  !t.Name.EndsWith("Description") &&
+                                  !t.Name.EndsWith("Dto") &&
+                                  !t.Name.EndsWith("Activity") &&
+                                  !t.Name.Contains("Xml") &&
+                                  !t.Name.Contains("Log") &&
+                                  !t.Name.Contains("Enumerator") &&
+                                  !t.Name.Contains("Internal") &&
+                                  !t.Name.StartsWith("<"))))
                     .OrderBy(t => t.Namespace)
                     .ThenBy(t => t.Name)
                     .ToList();
 
                 int addedForDll = 0;
+
+                // Предварительный проход строит обратные связи «builder-тип → методы, которые
+                // его возвращают» и «builder-тип → методы, которые его принимают».
+                // Раньше связь была только прямой (метод → тип) и работала в одну сторону:
+                // в блоке ClassObjectBuilder не было ни одной ссылки на способ его получить,
+                // поэтому запрос «создать тип объекта» не мог дойти от типа-конструктора
+                // обратно к точке входа и сценарий распадался на несвязанные фрагменты.
+                var builderCreators = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                var builderConsumers = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                BuildBuilderLinkMaps(types, builderCreators, builderConsumers);
 
                 foreach (var type in types)
                 {
@@ -279,7 +344,9 @@ public class ApiDumper
                             method,
                             summary,
                             ruMatch != null ? ruMatch.Name : null,
-                            false));
+                            false,
+                            xmlDoc.GetMethodReturns(method),
+                            xmlDoc.GetMethodParams(method)));
                     }
 
                     // ВТОРОЙ ПРОХОД: самостоятельные кириллические методы.
@@ -302,8 +369,35 @@ public class ApiDumper
                             method,
                             xmlDoc.GetMethodSummary(method),
                             null,
-                            true));
+                            true,
+                            xmlDoc.GetMethodReturns(method),
+                            xmlDoc.GetMethodParams(method)));
                     }
+
+                    // КОНСТРУКТОРЫ КАК ТОЧКИ ВХОДА.
+                    // Раньше они отбрасывались фильтром «!IsSpecialName»: рефлексия помечает
+                    // конструкторы как special-name наравне с аксессорами свойств. Между тем
+                    // генерация модели данных начинается именно с конструктора builder-типа.
+                    // Выборка идёт до проверки «есть ли что выводить», иначе типы, у которых
+                    // есть только конструкторы, бесследно исчезали из справочника.
+                    List<ConstructorEntry> ctorEntries;
+                    try
+                    {
+                        ctorEntries = type
+                            .GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+                            .Select(c => BuildConstructorEntry(type, c, xmlDoc))
+                            .OrderBy(c => c.Parameters.Count)
+                            .ToList();
+                    }
+                    catch (Exception)
+                    {
+                        ctorEntries = new List<ConstructorEntry>();
+                    }
+
+                    // Унаследованные методы завершения сценария (Save/Delete/Build) добавляются
+                    // ДО дедупликации, чтобы пройти те же проверки уникальности.
+                    if (IsBuilderRelatedType(type))
+                        AddInheritedBuilderMembers(type, methodEntries);
 
                     // Описание типа (класса/интерфейса) из парного XML-файла документации
                     string typeSummary = xmlDoc.GetTypeSummary(type);
@@ -330,23 +424,69 @@ public class ApiDumper
                     foreach (var e in methodEntries.Where(e => fullNameCounts[e.FullName] > 1))
                         e.FullName = $"{e.FullName} -> {e.ReturnType}";
 
-                    if (!propLines.Any() && !methodEntries.Any()) continue;
+                    if (!propLines.Any() && !methodEntries.Any() && !ctorEntries.Any()) continue;
 
                     // САМОДОСТОЯТЕЛЬНАЯ ШАПКА БЛОКА: полное имя типа, пространство имён и сборка
                     // дублируются в каждом блоке, чтобы сплиттеры RAG не теряли контекст фрагмента.
                     string ns = string.IsNullOrEmpty(type.Namespace) ? "Global" : type.Namespace;
-                    sb.AppendLine($"### [Type] {type.FullName}");
+
+                    // Арность generic-типа в метаданных записывается обратной кавычкой (`1),
+                    // которая внутри Markdown-строки в обратных кавычках обрывает code-span.
+                    // Нормализация приведена к тому же виду, что и в полных именах методов.
+                    string displayFullName = (type.FullName ?? type.Name).Replace('`', '\'');
+
+                    sb.AppendLine($"### [Type] {displayFullName}");
                     sb.AppendLine($"- **Namespace:** `{ns}`");
                     sb.AppendLine($"- **Assembly:** `{dllName}`");
 
                     // Явно отделяем прикладной Macro DSL от низкоуровневого Core Open API.
+                    // Для builder/factory-типов уровень уточняется: это низкоуровневый Core,
+                    // но именно через него собирается модель данных, о чём поиск должен знать.
                     string apiLevel = IsMacroDslType(type)
                         ? "Macro DSL (доступно внутри MacroProvider)"
-                        : "Core Open API";
+                        : IsBuilderRelatedType(type)
+                            ? "Core Open API (генерация модели данных)"
+                            : "Core Open API";
                     sb.AppendLine($"- **Уровень API:** {apiLevel}");
 
                     if (!string.IsNullOrEmpty(typeSummary))
                         sb.AppendLine($"- **Описание:** {typeSummary}");
+
+                    // Типы-конструкторы модели данных описываются в XML-документации без слов
+                    // «создать»/«справочник», поэтому в блок добавляются назначение и ключевые
+                    // слова: они дают лексический якорь для запросов «создать справочник»,
+                    // «создать тип объекта», «добавить параметр».
+                    string builderSubject = DescribeBuilderSubject(type);
+                    if (!string.IsNullOrEmpty(builderSubject))
+                    {
+                        sb.AppendLine($"- **Назначение:** Конструктор (builder) для создания и изменения элементов модели данных: {builderSubject}");
+                        var builderPhrases = GetBuilderSearchPhrases(type).ToList();
+                        sb.AppendLine("- **Ключевые слова:** создать, создание, добавить, новый, конструктор, " +
+                                      "сформировать, настроить, изменить, builder, factory, create, add, new, build, generate, " +
+                                      $"{builderSubject}, создать {builderSubject}, изменить {builderSubject}" +
+                                      (builderPhrases.Any() ? ", " + string.Join(", ", builderPhrases) : ""));
+
+                        // Обратные ссылки в блоке самого builder-типа: без них запрос
+                        // «создать тип объекта» упирался в блок ClassObjectBuilder, где не было
+                        // ни одного имени метода-точки входа, и пользователь не мог собрать сценарий.
+                        List<string> creators;
+                        if (builderCreators.TryGetValue(type.Name, out creators) && creators.Any())
+                            sb.AppendLine($"- **Как получить (из кода):** {string.Join("; ", creators)}");
+                        else if (!builderConsumers.ContainsKey(type.Name))
+                        {
+                            // У ClassObjectBuilder/UniqueIndexBuilder/LinkGroupBuilder фабрики нет
+                            // вовсе — они создаются только оператором new. Молчание в этом месте
+                            // читалось как отсутствие сценария, поэтому перечисляются конструкторы.
+                            string noFactoryHint = BuildNoFactoryHint(type);
+                            if (!string.IsNullOrEmpty(noFactoryHint))
+                                sb.AppendLine($"- **Как получить (из кода):** {noFactoryHint}");
+                        }
+
+                        List<string> consumers;
+                        if (builderConsumers.TryGetValue(type.Name, out consumers) && consumers.Any())
+                            sb.AppendLine($"- **Прямое создание:** этот конструктор принимается в {string.Join("; ", consumers)}");
+                    }
+
                     sb.AppendLine();
 
                     if (propLines.Any())
@@ -355,6 +495,46 @@ public class ApiDumper
                         foreach (var p in propLines)
                             sb.AppendLine($"- `{p.TypeName} {p.Name}`{p.RuNote}{p.DocNote}");
                         sb.AppendLine();
+                    }
+
+                    // КОНСТРУКТОРЫ ВЫВОДЯТСЯ ПЕРВЫМИ: это точка входа сценария генерации модели,
+                    // и именно с неё начинается любой код создания справочника или типа объектов.
+                    if (ctorEntries.Any())
+                    {
+                        foreach (var c in ctorEntries)
+                        {
+                            // Отдельная секция H4: parse() закрывает секцию на заголовке,
+                            // поэтому конструктор становится самостоятельным RAG-чанком.
+                            sb.AppendLine($"#### [Constructor] `{c.Signature}`");
+                            sb.AppendLine($"- **Полное имя:** `{c.FullName}`");
+                            sb.AppendLine($"- **Тип:** `{type.Name}`");
+
+                            if (!string.IsNullOrEmpty(c.Summary))
+                                sb.AppendLine($"- **Описание:** {c.Summary}");
+
+                            if (!string.IsNullOrEmpty(c.Purpose))
+                                sb.AppendLine($"- **Назначение:** {c.Purpose}");
+
+                            // «Возвращает» выводится только для информативного текста <returns>.
+                            // У конструктора нет XML-описания результата, если он не документирован,
+                            // а синтетическое «Созданный экземпляр X» дублировало заголовок секции
+                            // и уже покрыто строкой «**Назначение:**».
+                            if (IsInformativeReturns(c.Returns, c.Summary))
+                                sb.AppendLine($"- **Возвращает:** {c.Returns}");
+
+                            if (c.Parameters.Any())
+                            {
+                                sb.AppendLine("- **Параметры:**");
+                                foreach (var p in c.Parameters)
+                                    sb.AppendLine(FormatParameterLine(p, c.ParamDocs));
+                            }
+
+                            string keywordLine = BuildConstructorKeywords(type, c);
+                            if (!string.IsNullOrEmpty(keywordLine))
+                                sb.AppendLine($"- **Ключевые слова:** {keywordLine}");
+
+                            sb.AppendLine();
+                        }
                     }
 
                     if (methodEntries.Any())
@@ -366,14 +546,27 @@ public class ApiDumper
                             sb.AppendLine($"#### [Method] `{m.Signature}`");
                             sb.AppendLine($"- **Полное имя:** `{m.FullName}`");
 
+                            // Тип заново называется внутри каждого чанка: сплиттер RAG
+                            // не сохраняет родительский заголовок, и без этой строки
+                            // метод терял связь со своим типом при извлечении фрагмента.
+                            if (!string.IsNullOrEmpty(typeSummary))
+                                sb.AppendLine($"- **Тип:** `{type.Name}` — {typeSummary}");
+                            else
+                                sb.AppendLine($"- **Тип:** `{type.Name}`");
+
                             if (!string.IsNullOrEmpty(m.Summary))
                                 sb.AppendLine($"- **Описание:** {m.Summary}");
+
+                            // Только информативный <returns>: пересказ summary дублировал
+                            // предыдущую строку «**Описание:**» и не описывал результат.
+                            if (IsInformativeReturns(m.Returns, m.Summary))
+                                sb.AppendLine($"- **Возвращает:** {m.Returns}");
 
                             if (m.Parameters.Any())
                             {
                                 sb.AppendLine("- **Параметры:**");
                                 foreach (var p in m.Parameters)
-                                    sb.AppendLine($"  - `{p}`");
+                                    sb.AppendLine(FormatParameterLine(p, m.ParamDocs));
                             }
 
                             if (!string.IsNullOrEmpty(m.Alias))
@@ -384,6 +577,24 @@ public class ApiDumper
 
                             if (m.IsAsync)
                                 sb.AppendLine("- **Async**");
+
+                            // Обратная ссылка: если метод возвращает builder-тип, сценарий
+                            // продолжается в блоке этого типа. Без строки «Как получить»
+                            // точка входа CreateReferenceBuilder не связывалась с ReferenceBuilder.
+                            string builderReturn = DescribeBuilderSubject(m.ReturnType);
+                            if (!string.IsNullOrEmpty(builderReturn))
+                            {
+                                sb.AppendLine($"- **Как получить:** этот метод возвращает конструктор `{m.ReturnType}` ({builderReturn}) — далее настраивай и сохраняй его.");
+
+                                // Метод-точка входа тоже получает лексический якорь: без него
+                                // запрос «создать справочник» не совпадал с текстом описания
+                                // «Создает конструктор для создания справочника» из-за разных
+                                // словоформ глагола, и метод находился только по точной сигнатуре.
+                                var entryPhrases = GetBuilderSearchPhrases(m.ReturnType).ToList();
+                                sb.AppendLine("- **Ключевые слова:** создать, создание, добавить, новый, конструктор, " +
+                                              $"builder, factory, create, new, {m.ReturnType}, {builderReturn}" +
+                                              (entryPhrases.Any() ? ", " + string.Join(", ", entryPhrases) : ""));
+                            }
 
                             sb.AppendLine();
                         }
@@ -612,6 +823,16 @@ public class ApiDumper
 
         /// <summary>Нормализованное имя возвращаемого типа — для различения метаданных-коллизий.</summary>
         public string ReturnType;
+
+        /// <summary>Описание возвращаемого значения из тега &lt;returns&gt;; пусто, если его нет.</summary>
+        public string Returns;
+
+        /// <summary>
+        /// Описания параметров из тегов &lt;param name="..."&gt;: имя параметра → текст.
+        /// Нужны, чтобы строка параметра в чанке содержала предметные слова
+        /// («folder — Папка каталога справочников») и находилась по смыслу.
+        /// </summary>
+        public Dictionary<string, string> ParamDocs;
     }
 
     /// <summary>
@@ -632,6 +853,25 @@ public class ApiDumper
         string summary,
         string alias,
         bool ruOnly)
+    {
+        return BuildMethodEntry(type, method, summary, alias, ruOnly, null, null);
+    }
+
+    /// <summary>
+    /// Перегрузка BuildMethodEntry с дополнительными данными XML-документации:
+    /// текстом тега &lt;returns&gt; и описаниями параметров. Тег &lt;returns&gt; часто
+    /// содержит предметные слова, которых нет ни в имени метода, ни в его summary
+    /// («Конструктор справочника» у CreateReferenceBuilder), поэтому он выводится
+    /// отдельной строкой и участвует в поиске.
+    /// </summary>
+    private static MethodEntry BuildMethodEntry(
+        Type type,
+        MethodInfo method,
+        string summary,
+        string alias,
+        bool ruOnly,
+        string returns,
+        Dictionary<string, string> paramDocs)
     {
         var parameters = method.GetParameters()
             .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}")
@@ -657,8 +897,749 @@ public class ApiDumper
             Parameters = parameters,
             RuOnly = ruOnly,
             IsAsync = method.Name.EndsWith("Async", StringComparison.Ordinal),
-            ReturnType = FormatTypeName(method.ReturnType)
+            ReturnType = FormatTypeName(method.ReturnType),
+            Returns = returns,
+            ParamDocs = paramDocs
         };
+    }
+
+    /// <summary>
+    /// Элемент списка конструкторов типа для итогового Markdown.
+    ///
+    /// Зачем отдельная сущность: рефлексия помечает конструкторы как special-name,
+    /// и фильтр «!IsSpecialName» молча выбрасывал их из дампа. Между тем именно
+    /// конструкторы являются документированными точками входа генерации модели данных
+    /// («Конструктор типа объектов справочника», «Конструктор справочника»):
+    /// без них пользователь не мог собрать ни одного сценария создания модели.
+    /// </summary>
+    private sealed class ConstructorEntry
+    {
+        /// <summary>Читаемая сигнатура вида "new ClassObjectBuilder(ClassTree classes)".</summary>
+        public string Signature;
+
+        /// <summary>Полное имя с типами параметров: для точного поиска по сигнатуре.</summary>
+        public string FullName;
+
+        /// <summary>Описание из тега summary XML-документации; пусто, если описания нет.</summary>
+        public string Summary;
+
+        /// <summary>Список параметров в виде "ClassTree classes".</summary>
+        public List<string> Parameters;
+
+        /// <summary>Описания параметров из тегов &lt;param&gt;: имя параметра → текст.</summary>
+        public Dictionary<string, string> ParamDocs;
+
+        /// <summary>Описание возвращаемого значения из тега &lt;returns&gt;.</summary>
+        public string Returns;
+
+        /// <summary>Назначение конструктора, выведенное из текста summary и имени типа.</summary>
+        public string Purpose;
+    }
+
+    /// <summary>
+    /// Формирует запись конструктора для вывода: сигнатуру в C#-нотации,
+    /// полное имя с типами параметров, список параметров и тексты XML-документации.
+    /// </summary>
+    /// <param name="type">Объявляющий тип — используется для полного имени конструктора.</param>
+    /// <param name="ctor">Конструктор, полученный через Reflection.</param>
+    /// <param name="xmlDoc">Поставщик XML-документации (может быть null).</param>
+    /// <returns>Готовая запись конструктора для последующего вывода.</returns>
+    private static ConstructorEntry BuildConstructorEntry(
+        Type type,
+        ConstructorInfo ctor,
+        XmlDocProvider xmlDoc)
+    {
+        var parameters = ctor.GetParameters()
+            .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}")
+            .ToList();
+
+        string typeName = (type.FullName ?? type.Name).Replace('`', '\'');
+
+        string parameterTypes = string.Join(
+            ", ",
+            ctor.GetParameters().Select(p => FormatTypeName(p.ParameterType)));
+
+        string summary = xmlDoc == null ? null : xmlDoc.GetConstructorSummary(ctor);
+        string returns = xmlDoc == null ? null : xmlDoc.GetConstructorReturns(ctor);
+        var paramDocs = xmlDoc == null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : xmlDoc.GetConstructorParams(ctor);
+
+        return new ConstructorEntry
+        {
+            Signature = $"new {type.Name}({string.Join(", ", parameters)})",
+            FullName = $"{typeName}.#ctor({parameterTypes})",
+            Summary = summary,
+            Parameters = parameters,
+            ParamDocs = paramDocs,
+            Returns = returns,
+            Purpose = BuildConstructorPurpose(type, ctor, summary)
+        };
+    }
+
+    /// <summary>
+    /// Выводит назначение конструктора в терминах предметной области.
+    ///
+    /// Проблема, которую решает метод: описания builder-конструкторов в XML-документации
+    /// говорят «Конструктор типа объектов справочника», но не содержат глаголов
+    /// «создать»/«добавить» и не упоминают имени типа в том виде, как его ищет пользователь.
+    /// Формулировка собирается из трёх источников: имя builder-типа (ClassObjectBuilder →
+    /// «тип объектов справочника»), текст summary и позиция параметров (конструктор
+    /// с существующим объектом предназначен для редактирования, без него — для создания).
+    /// </summary>
+    private static string BuildConstructorPurpose(Type type, ConstructorInfo ctor, string summary)
+    {
+        string subject = DescribeBuilderSubject(type);
+        bool isEdit = !string.IsNullOrEmpty(summary) &&
+                      (summary.IndexOf("для редактирования", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       summary.IndexOf("существующ", StringComparison.OrdinalIgnoreCase) >= 0);
+
+        if (string.IsNullOrEmpty(subject))
+            return isEdit ? "Изменение существующего элемента модели данных" : null;
+
+        return isEdit
+            ? $"Изменение существующего элемента модели данных: {subject}"
+            : $"Создание элемента модели данных: {subject}";
+    }
+
+    /// <summary>
+    /// Переводит имя типа-конструктора в предметную формулировку на русском языке.
+    /// Возвращает null для типов, не относящихся к генерации модели данных.
+    /// Соответствие задаётся явной таблицей: автоматический перевод имён
+    /// (Builder → «конструктор») давал бы бессмысленные фразы и бесполезный
+    /// для поиска текст.
+    /// </summary>
+    private static string DescribeBuilderSubject(Type type)
+    {
+        if (type == null)
+            return null;
+
+        string name = type.Name;
+        int tickIndex = name.IndexOf('`');
+        if (tickIndex > 0)
+            name = name.Substring(0, tickIndex);
+
+        switch (name)
+        {
+            case "ReferenceBuilder": return "справочник";
+            case "ClassObjectBuilder": return "тип объектов (класс объектов) справочника";
+            case "ParameterInfoBuilder": return "параметр справочника";
+            case "ExtendedParameterInfoBuilder": return "расширенный параметр справочника";
+            case "ParameterGroupBuilder": return "группа параметров справочника";
+            case "ExtendedParametersStorageBuilder": return "хранилище параметров справочника";
+            case "LinkGroupBuilder": return "группа связей типа объектов";
+            case "UniqueIndexBuilder": return "индекс уникальности справочника";
+            case "ObjectFormatBuilder": return "формат отображения объекта";
+            case "ObjectParameterFormatBuilder": return "формат отображения параметра";
+            case "AliasedParameterInfoBuilder": return "параметр с алиасом";
+        }
+
+        if (name.EndsWith("Builder", StringComparison.Ordinal) ||
+            name.EndsWith("BuilderBase", StringComparison.Ordinal))
+            return "элемент модели данных";
+
+        if (name.EndsWith("Factory", StringComparison.Ordinal))
+            return "фабрика создания элементов модели данных";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Возвращает готовые поисковые формулировки для builder-типа — в тех словоформах,
+    /// в которых их реально пишет пользователь.
+    ///
+    /// Отдельная таблица нужна из-за русского словообразования: предметная формулировка
+    /// типа «тип объектов (класс объектов) справочника» не совпадает с пользовательским
+    /// запросом «создать тип объекта» — падеж и число других слов не выводятся из имени
+    /// типа программно. Без таблицы запросы в единственном числе не находили конструктор
+    /// даже при наличии назначения и ключевых слов.
+    /// </summary>
+    private static IEnumerable<string> GetBuilderSearchPhrases(Type type)
+    {
+        return type == null
+            ? Enumerable.Empty<string>()
+            : GetBuilderSearchPhrases(SimpleTypeName(type.Name));
+    }
+
+    /// <summary>
+    /// Строковая перегрузка: возвращаемый тип метода известен только как отформатированный
+    /// текст, поэтому имя приводится к простому виду тем же способом, что и в
+    /// <see cref="DescribeBuilderSubject(string)"/> — отбрасываются generic-аргументы,
+    /// пространство имён и арность.
+    /// </summary>
+    private static IEnumerable<string> GetBuilderSearchPhrases(string simpleName)
+    {
+        if (string.IsNullOrEmpty(simpleName))
+            return Enumerable.Empty<string>();
+
+        switch (SimpleTypeName(simpleName))
+        {
+            case "ReferenceBuilder":
+                return new[]
+                {
+                    "создать справочник, создание справочника, новый справочник, генерация справочника",
+                    "create reference, reference builder, создать reference"
+                };
+            case "ClassObjectBuilder":
+                return new[]
+                {
+                    "создать тип объекта, создать тип объектов, создание типа объектов, новый тип объекта",
+                    "класс объектов, создать класс объектов, create class object, type builder"
+                };
+            case "ParameterInfoBuilder":
+            case "ExtendedParameterInfoBuilder":
+            case "AliasedParameterInfoBuilder":
+                return new[]
+                {
+                    "создать параметр, создать параметр справочника, добавить параметр, создание параметра",
+                    "create parameter, parameter builder"
+                };
+            case "ParameterGroupBuilder":
+                return new[]
+                {
+                    "создать группу параметров, добавить группу параметров, создание группы параметров",
+                    "create parameter group, parameter group builder"
+                };
+            case "UniqueIndexBuilder":
+                return new[] { "задать условие уникальности, создать индекс уникальности, уникальность типа объекта, уникальный индекс" };
+            case "LinkGroupBuilder":
+                return new[] { "создать связь, создать ссылочное свойство, добавить связь типа объектов" };
+            case "ObjectFormatBuilder":
+            case "ObjectParameterFormatBuilder":
+                return new[] { "настроить формат отображения, формат отображения объекта, формат параметра" };
+            case "ExtendedParametersStorageBuilder":
+                return new[] { "создать хранилище параметров, расширенные параметры справочника" };
+        }
+
+        return Enumerable.Empty<string>();
+    }
+
+    /// <summary>
+    /// Приводит имя типа к простому виду: без generic-аргументов, пространства имён и арности.
+    /// Нужен для сравнения имён типов, известных только как отформатированный текст
+    /// («TFlex.DOCs.Model.Structure.Builders.ReferenceBuilder`1» → «ReferenceBuilder»).
+    /// </summary>
+    private static string SimpleTypeName(string typeName)
+    {
+        if (string.IsNullOrEmpty(typeName))
+            return null;
+
+        string name = typeName;
+
+        int genericIndex = name.IndexOf('<');
+        if (genericIndex > 0)
+            name = name.Substring(0, genericIndex);
+
+        int lastDot = name.LastIndexOf('.');
+        if (lastDot >= 0 && lastDot < name.Length - 1)
+            name = name.Substring(lastDot + 1);
+
+        int tickIndex = name.IndexOf('`');
+        if (tickIndex > 0)
+            name = name.Substring(0, tickIndex);
+
+        return name;
+    }
+
+    /// <summary>
+    /// Перегрузка DescribeBuilderSubject для строкового имени типа.
+    /// Нужна в местах, где тип известен только как текст: например, возвращаемый тип метода
+    /// уже отформатирован в C#-нотацию и обратно в Type не преобразуется.
+    /// </summary>
+    private static string DescribeBuilderSubject(string typeName)
+    {
+        if (string.IsNullOrEmpty(typeName))
+            return null;
+
+        string name = SimpleTypeName(typeName);
+
+        switch (name)
+        {
+            case "ReferenceBuilder": return "справочник";
+            case "ClassObjectBuilder": return "тип объектов (класс объектов) справочника";
+            case "ParameterInfoBuilder": return "параметр справочника";
+            case "ExtendedParameterInfoBuilder": return "расширенный параметр справочника";
+            case "ParameterGroupBuilder": return "группа параметров справочника";
+            case "ExtendedParametersStorageBuilder": return "хранилище параметров справочника";
+            case "LinkGroupBuilder": return "группа связей типа объектов";
+            case "UniqueIndexBuilder": return "индекс уникальности справочника";
+            case "ObjectFormatBuilder": return "формат отображения объекта";
+            case "ObjectParameterFormatBuilder": return "формат отображения параметра";
+            case "AliasedParameterInfoBuilder": return "параметр с алиасом";
+        }
+
+        if (name.EndsWith("Builder", StringComparison.Ordinal) ||
+            name.EndsWith("BuilderBase", StringComparison.Ordinal) ||
+            name.EndsWith("Factory", StringComparison.Ordinal))
+            return "элемент модели данных";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Извлекает имя параметра из его отформатированного представления "ClassTree classes".
+    /// Имя параметра — последнее слово строки; для ref/out-параметров оно выглядит
+    /// как "value&amp;" и очищается от знака ссылки.
+    /// </summary>
+    private static string ExtractParameterName(string formattedParameter)
+    {
+        if (string.IsNullOrEmpty(formattedParameter))
+            return null;
+
+        int spaceIndex = formattedParameter.LastIndexOf(' ');
+        if (spaceIndex < 0 || spaceIndex >= formattedParameter.Length - 1)
+            return null;
+
+        string name = formattedParameter.Substring(spaceIndex + 1).Trim();
+        if (name.EndsWith("&", StringComparison.Ordinal))
+            name = name.Substring(0, name.Length - 1);
+
+        return name.Length == 0 ? null : name;
+    }
+
+    /// <summary>
+    /// Собирает строку ключевых слов для секции конструктора.
+    /// Ключевые слова выводятся из предметной формулировки типа и из описания,
+    /// чтобы запрос «создать тип объекта с нуля» находил конструктор без параметров.
+    /// </summary>
+    private static string BuildConstructorKeywords(Type type, ConstructorEntry ctor)
+    {
+        if (type == null || ctor == null)
+            return null;
+
+        var keywords = new List<string> { "создать", "создание", "новый", "конструктор" };
+        keywords.Add(type.Name);
+
+        string subject = DescribeBuilderSubject(type);
+        if (!string.IsNullOrEmpty(subject))
+        {
+            keywords.Add(subject);
+            keywords.Add($"создать {subject}");
+        }
+
+        keywords.AddRange(GetBuilderSearchPhrases(type));
+
+        if (!string.IsNullOrEmpty(ctor.Summary))
+            keywords.Add(ctor.Summary);
+
+        // Конструктор без параметров открывает сценарий «с нуля», поэтому получает
+        // дополнительный поисковый якорь. Overload с параметром «существующий объект»
+        // этого якоря не получает: он предназначен для редактирования, а не для создания,
+        // и лишний якорь уводил бы запрос «создать с нуля» на конструктор редактирования.
+        if (ctor.Parameters.Count == 0)
+            keywords.Add("с нуля, впервые, пустой");
+
+        return string.Join(", ", keywords.Where(k => !string.IsNullOrEmpty(k)));
+    }
+
+    /// <summary>
+    /// Глаголы, которыми начинается текст &lt;summary&gt;. Если текст &lt;returns&gt;
+    /// начинается с такого же глагола, он лишь пересказывает summary и не добавляет
+    /// информации о возвращаемом значении.
+    /// </summary>
+    private static readonly string[] SummaryVerbPrefixes =
+    {
+        "Возвращает", "Создает", "Создаёт", "Получает", "Удаляет", "Изменяет", "Находит",
+        "Выполняет", "Задает", "Задаёт", "Устанавливает", "Проверяет", "Загружает",
+        "Сохраняет", "Добавляет", "Копирует", "Перемещает", "Открывает", "Закрывает",
+        "Обновляет", "Формирует", "Вычисляет", "Преобразует", "Ищет"
+    };
+
+    /// <summary>
+    /// Определяет, несёт ли текст тега &lt;returns&gt; информацию о возвращаемом значении.
+    ///
+    /// Проблема, которую решает метод: в вывод попадало summary вместо returns (поиск
+    /// жёстко читал словарь summary), поэтому строки «**Описание:**» и «**Возвращает:**»
+    /// дублировали друг друга в 73 % случаев. Дополнительно отсекается пересказ summary,
+    /// начинающийся с того же глагола, — такой текст тоже не сообщает тип и смысл
+    /// результата, а лишь утяжеляет чанк и размывает вектор запроса.
+    ///
+    /// Значимые формулировки вида «Ссылка на экземпляр AccessManager», «Список групп
+    /// доступа» или «Созданная папка каталога справочников» проверку проходят:
+    /// существительное-результат важнее глагола-действия.
+    /// </summary>
+    /// <param name="returns">Текст тега returns (может быть null).</param>
+    /// <param name="summary">Текст тега summary той же сигнатуры (может быть null).</param>
+    /// <returns>true, если строку «**Возвращает:**» нужно вывести.</returns>
+    private static bool IsInformativeReturns(string returns, string summary)
+    {
+        if (string.IsNullOrEmpty(returns))
+            return false;
+
+        string value = returns.Trim();
+        if (value.Length == 0)
+            return false;
+
+        if (!string.IsNullOrEmpty(summary) &&
+            string.Equals(value, summary.Trim(), StringComparison.Ordinal))
+            return false;
+
+        foreach (var verb in SummaryVerbPrefixes)
+        {
+            if (value.StartsWith(verb, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Слова, которые в описании параметра лишь повторяют его тип и потому не выводятся.
+    /// </summary>
+    private static readonly HashSet<string> DegenerateParamDocs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "Объект", "Тип", "Параметр", "Значение", "Имя", "Список", "Коллекция",
+        "Индекс", "Ключ", "Ссылка", "Флаг", "Признак"
+    };
+
+    /// <summary>
+    /// Формирует строку параметра с описанием из XML либо без него.
+    /// Описание-«пустышка» (например «— Объект») опускается: оно не различает параметры
+    /// и только утяжеляет чанк.
+    /// </summary>
+    /// <param name="formattedParameter">Параметр в отформатированном виде «Тип имя».</param>
+    /// <param name="paramDocs">Карта «имя параметра → описание».</param>
+    /// <returns>Строка для вывода в списке «**Параметры:**».</returns>
+    private static string FormatParameterLine(string formattedParameter, Dictionary<string, string> paramDocs)
+    {
+        string doc = null;
+        string paramName = ExtractParameterName(formattedParameter);
+
+        if (!string.IsNullOrEmpty(paramName) && paramDocs != null)
+            paramDocs.TryGetValue(paramName, out doc);
+
+        if (string.IsNullOrEmpty(doc))
+            return $"  - `{formattedParameter}`";
+
+        string trimmedDoc = doc.Trim().TrimEnd('.');
+        if (DegenerateParamDocs.Contains(trimmedDoc))
+            return $"  - `{formattedParameter}`";
+
+        return $"  - `{formattedParameter}` — {doc}";
+    }
+
+    /// <summary>
+    /// Строит обратные карты связей для типов-конструкторов модели данных:
+    ///   creators  — «builder-тип → методы этого дампа, которые его возвращают»;
+    ///   consumers — «builder-тип → методы, которые принимают его параметром».
+    ///
+    /// Проход выполняется до генерации текста, потому что в блоках builder-типов нужно
+    /// назвать чужие методы (CreateReferenceBuilder, ParameterGroupBuilder.AddParameter),
+    /// а они уже отфильтрованы и агрегированы. Без карт связь оставалась односторонней:
+    /// от метода к типу, но не от типа к методу, и сценарий генерации модели данных нельзя
+    /// было пройти ни в поиске, ни чтением.
+    ///
+    /// Учитываются только типы, реально попадающие в дамп, иначе в текст ссылок попали бы
+    /// методы отфильтрованных служебных классов.
+    /// </summary>
+    private static void BuildBuilderLinkMaps(
+        List<Type> types,
+        Dictionary<string, List<string>> creators,
+        Dictionary<string, List<string>> consumers)
+    {
+        var emitted = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var type in types)
+        {
+            string name = SimpleTypeName(type.Name);
+            if (!string.IsNullOrEmpty(name))
+                emitted.Add(name);
+        }
+
+        foreach (var type in types)
+        {
+            IEnumerable<MethodInfo> methods;
+            try
+            {
+                methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance |
+                                          BindingFlags.Static | BindingFlags.DeclaredOnly);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var method in methods)
+            {
+                try
+                {
+                    // Прямая связь: метод возвращает builder — значит он и есть точка входа.
+                    // Разворачивание ValueTask<T>/Task<T> обязательно: фабрики вроде
+                    // ParameterGroupBuilder.CreateForEditAsync объявлены как ValueTask<ParameterGroupBuilder>,
+                    // и без этого шага у maker-свойств не находится источник.
+                    // Добавочные/снимающие аксессоры свойств пропускаются: они уже описаны
+                    // строкой свойства, а «CalendarCategoryManager.get_SettingsFactory()»
+                    // в подсказке выглядит как внутренний вызов, а не как точка входа.
+                    if (method.IsSpecialName)
+                        continue;
+
+                    Type returnType = UnwrapAsyncReturnType(method.ReturnType);
+                    string returnName = SimpleTypeName(returnType == null ? null : returnType.Name);
+                    if (!string.IsNullOrEmpty(returnName) && IsEmittedBuilder(returnType, emitted))
+                        AddLink(creators, returnName, BuildCreatorSignature(type, method));
+
+                    // Связь «builder передаётся в метод»: так находятся места, где собранный
+                    // конструктор применяется, например ClassObjectBuilder.ParameterGroups.AddParameter.
+                    foreach (var parameter in method.GetParameters())
+                        AddConsumerLink(consumers, emitted, type, method.Name, parameter.ParameterType);
+                }
+                catch
+                {
+                    // Разрешение типов параметров у некоторых членов может падать на
+                    // отсутствующих зависимостях загрузчика: одна такая точка не должна
+                    // прерывать построение остальных связей.
+                }
+            }
+
+            // ВАЖНО: у ClassObjectBuilder, ParameterGroupBuilder, UniqueIndexBuilder и
+            // LinkGroupBuilder нет ни одного метода-фабрики — они создаются ТОЛЬКО через
+            // оператор new. Если сканировать одни методы, эти типы остаются вообще без
+            // обратных ссылок и запрос «создать тип объекта» упирается в тупик.
+            IEnumerable<ConstructorInfo> typeCtors;
+            try
+            {
+                typeCtors = type.GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            }
+            catch
+            {
+                typeCtors = new ConstructorInfo[0];
+            }
+
+            foreach (var ctor in typeCtors)
+            {
+                try
+                {
+                    foreach (var parameter in ctor.GetParameters())
+                        AddConsumerLink(consumers, emitted, type, "#ctor", parameter.ParameterType);
+                }
+                catch
+                {
+                }
+            }
+
+            // Свойства тоже создают builders: Parameter.Builder и ClassObjectBase.Builder
+            // возвращают готовый конструктор, и это ровно тот путь, которым пользуется
+            // прикладной код при редактировании существующего элемента модели.
+            IEnumerable<PropertyInfo> properties;
+            try
+            {
+                properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance |
+                                                BindingFlags.Static | BindingFlags.DeclaredOnly);
+            }
+            catch
+            {
+                properties = new PropertyInfo[0];
+            }
+
+            foreach (var property in properties)
+            {
+                try
+                {
+                    if (property.GetIndexParameters().Length != 0)
+                        continue;
+
+                    Type propertyType = property.PropertyType;
+                    string propertyTypeName = SimpleTypeName(propertyType == null ? null : propertyType.Name);
+                    if (string.IsNullOrEmpty(propertyTypeName) || !IsEmittedBuilder(propertyType, emitted))
+                        continue;
+
+                    string receiver = SimpleTypeName(type.Name);
+                    AddLink(creators, propertyTypeName,
+                            $"{propertyTypeName} {receiver}.{property.Name}");
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Формирует сигнатуру точки получения (точки входа) с реальными именами типов
+    /// параметров: «CreateReferenceBuilder(ReferenceCatalogFolder folder, bool, ...)».
+    /// Тип параметра обязателен — прикладной код без него не знает, что подставлять.
+    /// Асинхронные фабрики помечаются многоточием, чтобы было видно необходимость await.
+    /// </summary>
+    private static string BuildCreatorSignature(Type owner, MethodInfo method)
+    {
+        bool isAsync = method.ReturnType != null && method.ReturnType.IsGenericType &&
+                       (method.ReturnType.GetGenericTypeDefinition() == typeof(Task<>) ||
+                        method.ReturnType.GetGenericTypeDefinition() == typeof(ValueTask<>));
+
+        var parts = new List<string>();
+        foreach (var parameter in method.GetParameters())
+        {
+            string parameterType = SimpleTypeName(parameter.ParameterType == null ? null : parameter.ParameterType.Name);
+            parts.Add(string.IsNullOrEmpty(parameterType) ? "?" : parameterType);
+        }
+
+        string suffix = parts.Count == 0 ? "()" : "(" + string.Join(", ", parts) + ")";
+        if (isAsync)
+            suffix += "…";
+
+        return $"{SimpleTypeName(owner.Name)}.{method.Name}{suffix}";
+    }
+
+    /// <summary>
+    /// Список типов параметров через запятую: «ClassTree, ClassObject».
+    /// Собственная копия нужна потому, что BuildParameterList объявлен внутри
+    /// XmlDocProvider и использует XML-нормализацию имён, а здесь достаточно
+    /// коротких имён типов для читателя справочника.
+    /// </summary>
+    private static string DescribeParameters(ParameterInfo[] parameters)
+    {
+        if (parameters == null || parameters.Length == 0)
+            return string.Empty;
+
+        var parts = new List<string>(parameters.Length);
+        foreach (var parameter in parameters)
+        {
+            string name = SimpleTypeName(parameter.ParameterType == null ? null : parameter.ParameterType.Name);
+            parts.Add(string.IsNullOrEmpty(name) ? "?" : name);
+        }
+
+        return string.Join(", ", parts);
+    }
+
+    /// <summary>
+    /// Считает builder «достижимым из прикладного кода»: базовый тип без собственной
+    /// документации (System.*, внешние сборки) не должен попадать в обратные ссылки,
+    /// иначе они уводят к несуществующим в справочнике блокам.
+    /// </summary>
+    private static bool IsEmittedBuilder(Type t, HashSet<string> emitted)
+    {
+        if (t == null || string.IsNullOrEmpty(DescribeBuilderSubject(t)))
+            return false;
+
+        string simpleName = SimpleTypeName(t.Name);
+        return !string.IsNullOrEmpty(simpleName) && emitted.Contains(simpleName);
+    }
+
+    /// <summary>
+    /// Добавляет обратную связь «builder принимается параметром». Проверяется и сам тип
+    /// параметра, и тип элемента для массивов/ByRef: без этого методы вида
+    /// AddParameter(params ParameterInfoBuilder[] builders) теряют связь.
+    /// </summary>
+    private static void AddConsumerLink(
+        Dictionary<string, List<string>> consumers,
+        HashSet<string> emitted,
+        Type owner,
+        string memberName,
+        Type parameterType)
+    {
+        if (parameterType == null)
+            return;
+
+        if (parameterType.IsByRef || parameterType.IsArray)
+            parameterType = parameterType.GetElementType();
+
+        string parameterName = SimpleTypeName(parameterType == null ? null : parameterType.Name);
+        if (string.IsNullOrEmpty(parameterName) || !IsEmittedBuilder(parameterType, emitted))
+            return;
+
+        string ownerName = SimpleTypeName(owner.Name);
+        string linkedMember = memberName == "#ctor" ? $"new {ownerName}" : $"{ownerName}.{memberName}";
+        AddLink(consumers, parameterName, $"{linkedMember}(...)");
+    }
+
+    /// <summary>
+    /// Типы без единого метода-фабрики и без свойств-источников создаются только
+    /// оператором new: ClassObjectBuilder, UniqueIndexBuilder, LinkGroupBuilder.
+    ///
+    /// Для них обратной ссылки «как получить» не существует по устройству API, и её
+    /// отсутствие в блоке читается как потеря сценария. Строка с перечислением
+    /// публичных конструкторов закрывает этот пробел и служит лексическим якорем
+    /// для запроса «создать тип объекта».
+    /// </summary>
+    private static string BuildNoFactoryHint(Type type)
+    {
+        try
+        {
+            var ctors = type.GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            if (ctors.Length == 0)
+                return null;
+
+            var signatures = ctors
+                .OrderBy(c => c.GetParameters().Length)
+                .Select(c => $"new {SimpleTypeName(type.Name)}({DescribeParameters(c.GetParameters())})")
+                .Distinct()
+                .Take(4)
+                .ToList();
+
+            if (signatures.Count == 0)
+                return null;
+
+            return "у этого типа нет метода-фабрики — " + string.Join("; ", signatures);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Разворачивает Task&lt;T&gt;/ValueTask&lt;T&gt; до T. Асинхронные фабрики
+    /// (ReferenceBuilder.CreateForEditAsync, ParameterGroupBuilder.CreateForEditAsync)
+    /// без этого не распознаются как источник builder-типа.
+    /// </summary>
+    private static Type UnwrapAsyncReturnType(Type returnType)
+    {
+        if (returnType == null || !returnType.IsGenericType)
+            return returnType;
+
+        Type definition = returnType.GetGenericTypeDefinition();
+        if (definition == typeof(Task<>) || definition == typeof(ValueTask<>))
+            return returnType.GetGenericArguments()[0];
+
+        return returnType;
+    }
+
+    private static void AddLink(Dictionary<string, List<string>> map, string key, string value)
+    {
+        List<string> list;
+        if (!map.TryGetValue(key, out list))
+        {
+            list = new List<string>();
+            map[key] = list;
+        }
+
+        if (list.Count < 6 && !list.Contains(value))
+            list.Add(value);
+    }
+
+    /// <summary>
+    /// Определяет, является ли тип «конструктором» модели данных: builder/factory,
+    /// через который собираются справочники, типы объектов, параметры, связи и индексы.
+    ///
+    /// Проверка рекурсивна по объявляющему типу: вложенные типы вроде
+    /// ClassObjectBuilder.ClassObjectCollection или ParameterGroupBuilder.ParameterGroupCollection
+    /// сами не оканчиваются на Builder, но принадлежат builder-семейству и содержат
+    /// методы настройки (CanAddItem, CanRemoveItem), без которых сценарий не собрать.
+    /// </summary>
+    private static bool IsBuilderRelatedType(Type t)
+    {
+        if (t == null)
+            return false;
+
+        string name = t.Name;
+
+        // Отсекаем generic-арность (ParameterInfoBuilder`1 → ParameterInfoBuilder),
+        // иначе проверка суффикса не сработает.
+        int tickIndex = name.IndexOf('`');
+        if (tickIndex > 0)
+            name = name.Substring(0, tickIndex);
+
+        if (name.EndsWith("Builder", StringComparison.Ordinal) ||
+            name.EndsWith("BuilderBase", StringComparison.Ordinal) ||
+            name.EndsWith("Factory", StringComparison.Ordinal))
+            return true;
+
+        // Namespace тоже учитывается: TFlex.DOCs.Model.Structure.Builders — выделенное
+        // пространство имён конструкторов модели данных, и всё в нём является точкой входа.
+        string ns = t.Namespace ?? "";
+        if (ns.EndsWith(".Builders", StringComparison.Ordinal))
+            return true;
+
+        return t.DeclaringType != null && IsBuilderRelatedType(t.DeclaringType);
     }
 
     /// <summary>
@@ -797,6 +1778,113 @@ public class ApiDumper
                 RuNote = " [унаследовано]",
                 DocNote = string.IsNullOrEmpty(summary) ? "" : $" — {summary}"
             });
+        }
+    }
+
+    /// <summary>
+    /// Дополняет блок builder-типа унаследованными терминальными методами из его базового
+    /// класса. Причина: рабочие методы завершения сценария (Save, Delete, Build) объявлены
+    /// в базовом типе (ParameterGroupBuilderBase, ObjectFormatBuilderBase и т.п.), а выборка
+    /// с флагом DeclaredOnly их не возвращает. В справочнике от ParameterGroupBuilder
+    /// оставались только его собственные настройки без единого способа сохранить результат.
+    ///
+    /// Список имён намеренно ограничен InheritedBuilderMemberNames: без него в блок
+    /// утекли бы десятки служебных унаследованных членов и размыли векторный поиск.
+    /// </summary>
+    /// <param name="type">Тип-конструктор, для которого собирается блок.</param>
+    /// <param name="methodEntries">Уже собранные собственные методы типа.</param>
+    private static void AddInheritedBuilderMembers(
+        Type type,
+        List<MethodEntry> methodEntries)
+    {
+        if (type == null || methodEntries == null)
+            return;
+
+        const BindingFlags inheritedFlags =
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy;
+
+        // Защита от задвоения: методы, уже показанные в блоке (в том числе собственные
+        // переопределения), повторно не добавляются.
+        var emitted = new HashSet<string>(methodEntries.Select(e => e.Signature));
+
+        for (Type baseType = type.BaseType; baseType != null; baseType = baseType.BaseType)
+        {
+            // Поднимаемся ровно до конца цепочки builder-баз: за её пределами лежат
+            // служебные типы (Object, IDisposable-обёртки), члены которых не нужны.
+            string baseName = baseType.Name;
+            int tickIndex = baseName.IndexOf('`');
+            if (tickIndex > 0)
+                baseName = baseName.Substring(0, tickIndex);
+
+            MethodInfo[] methods;
+            try
+            {
+                methods = baseType.GetMethods(inheritedFlags);
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+
+            foreach (var method in methods)
+            {
+                if (!InheritedBuilderMemberNames.Contains(method.Name))
+                    continue;
+
+                // Служебные члены (Dispose от IDisposable и т.п.) в справочнике API не нужны.
+                if (method.IsSpecialName || method.Name == "Dispose")
+                    continue;
+
+                try
+                {
+                    if (method.GetParameters().Length == 0 && method.ReturnType == typeof(void) &&
+                        method.Name != "Save" && method.Name != "Delete" && method.Name != "Validate")
+                        continue;
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                var signature = $"{FormatTypeName(method.ReturnType)} {method.Name}(" +
+                                string.Join(", ", method.GetParameters()
+                                    .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}")) +
+                                ") [унаследовано от " + baseType.Name + "]";
+
+                if (!emitted.Add(signature))
+                    continue;
+
+                // Полное имя объявляется по БАЗОВОМУ типу: именно там метод и находится,
+                // поэтому строка служит корректным указанием для поиска в документации.
+                string baseTypeFullName = (baseType.FullName ?? baseType.Name).Replace('`', '\'');
+
+                methodEntries.Add(new MethodEntry
+                {
+                    Signature = signature,
+                    FullName = $"{baseTypeFullName}.{method.Name}(" +
+                               string.Join(", ", method.GetParameters()
+                                   .Select(p => FormatTypeName(p.ParameterType))) + ")",
+                    Summary = $"Унаследованный метод {baseType.Name}.{method.Name}: доступен у " +
+                              $"{type.Name} и выполняет ту же роль в сценарии.",
+                    Alias = null,
+                    Parameters = method.GetParameters()
+                        .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}")
+                        .ToList(),
+                    RuOnly = false,
+                    IsAsync = method.Name.EndsWith("Async", StringComparison.Ordinal),
+                    ReturnType = FormatTypeName(method.ReturnType),
+                    Returns = null,
+                    ParamDocs = null
+                });
+            }
+
+            // Цепочка обрывается на первом же типе, не относящемся к builder-семейству:
+            // дальше лежат служебные базовые классы платформы.
+            if (!baseName.EndsWith("BuilderBase", StringComparison.Ordinal) &&
+                !baseName.EndsWith("FactoryBase", StringComparison.Ordinal) &&
+                !baseName.EndsWith("Builder", StringComparison.Ordinal) &&
+                !baseName.EndsWith("Factory", StringComparison.Ordinal))
+                break;
         }
     }
 
@@ -1129,6 +2217,24 @@ public class XmlDocProvider
     private readonly Dictionary<string, string> _docs =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Словарь текстов тега &lt;returns&gt;: ключ — идентификатор метода, значение — описание
+    /// возвращаемого значения. Именно этот тег содержит самую ценную для поиска информацию
+    /// о builder-методах: "Конструктор справочника", "Созданный справочник" и т.п.
+    /// Раньше тег не читался вовсе, и точка входа генерации модели данных
+    /// (CreateReferenceBuilder) описывалась только глаголом "Создает...".
+    /// </summary>
+    private readonly Dictionary<string, string> _returns =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Словарь описаний параметров: ключ — идентификатор метода, значение — карта
+    /// «имя параметра → описание из &lt;param name="..."&gt;». Используется для вывода
+    /// смысла параметров рядом с их сигнатурой ("folder — Папка каталога справочников").
+    /// </summary>
+    private readonly Dictionary<string, Dictionary<string, string>> _params =
+        new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Количество успешно извлечённых описаний. Удобно для диагностики в консоли.</summary>
     public int Count { get { return _docs.Count; } }
 
@@ -1145,6 +2251,8 @@ public class XmlDocProvider
             return false;
 
         _docs.Clear();
+        _returns.Clear();
+        _params.Clear();
 
         try
         {
@@ -1163,24 +2271,47 @@ public class XmlDocProvider
                 if (nameAttr == null || string.IsNullOrEmpty(nameAttr.Value))
                     continue;
 
+                // Теги разбираются НЕЗАВИСИМО друг от друга. Раньше отсутствие <summary>
+                // приводило к continue, и вместе с ним терялись <param> и <returns> —
+                // а у builder-методов именно они содержат ключевые слова предметной области.
                 XElement summaryElement = member.Element("summary");
-                if (summaryElement == null)
-                    continue;
+                if (summaryElement != null)
+                {
+                    string summaryText = CleanText(summaryElement.Value);
+                    if (!string.IsNullOrEmpty(summaryText) && !_docs.ContainsKey(nameAttr.Value))
+                        _docs.Add(nameAttr.Value, summaryText);
+                }
 
-                string summaryText = CleanText(summaryElement.Value);
-                if (string.IsNullOrEmpty(summaryText))
-                    continue;
+                XElement returnsElement = member.Element("returns");
+                if (returnsElement != null)
+                {
+                    string returnsText = CleanText(returnsElement.Value);
+                    if (!string.IsNullOrEmpty(returnsText) && !_returns.ContainsKey(nameAttr.Value))
+                        _returns.Add(nameAttr.Value, returnsText);
+                }
 
-                // Первое вхождение имеет приоритет: повторные ключи (например, у перегрузок с одинаковым членом)
-                // не должны перезаписывать уже найденное описание.
-                if (!_docs.ContainsKey(nameAttr.Value))
-                    _docs.Add(nameAttr.Value, summaryText);
+                var paramMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (XElement paramElement in member.Elements("param"))
+                {
+                    XAttribute paramName = paramElement.Attribute("name");
+                    if (paramName == null || string.IsNullOrEmpty(paramName.Value))
+                        continue;
+
+                    string paramText = CleanText(paramElement.Value);
+                    if (!string.IsNullOrEmpty(paramText))
+                        paramMap[paramName.Value] = paramText;
+                }
+
+                if (paramMap.Count > 0 && !_params.ContainsKey(nameAttr.Value))
+                    _params.Add(nameAttr.Value, paramMap);
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($" [XML Docs] Не удалось прочитать {Path.GetFileName(xmlPath)}: {ex.Message}");
             _docs.Clear();
+            _returns.Clear();
+            _params.Clear();
             return false;
         }
 
@@ -1259,21 +2390,207 @@ public class XmlDocProvider
     }
 
     /// <summary>
+    /// Находит описание возвращаемого значения метода по тегу &lt;returns&gt;.
+    /// Логика поиска ключа повторяет GetMethodSummary: сначала точное совпадение
+    /// по списку типов параметров, затем fallback по префиксу идентификатора.
+    /// </summary>
+    /// <param name="method">Метод, для которого нужно получить текст тега returns.</param>
+    /// <returns>Однострочное описание возвращаемого значения или null.</returns>
+    public string GetMethodReturns(MethodInfo method)
+    {
+        return GetReturnsByMember(method == null ? null : method.DeclaringType,
+                                  method == null ? null : method.Name,
+                                  method);
+    }
+
+    /// <summary>
+    /// Находит описание возвращаемого значения конструктора по тегу &lt;returns&gt;.
+    /// </summary>
+    /// <param name="ctor">Конструктор, для которого нужно получить текст тега returns.</param>
+    /// <returns>Однострочное описание возвращаемого значения или null.</returns>
+    public string GetConstructorReturns(ConstructorInfo ctor)
+    {
+        if (ctor == null || ctor.DeclaringType == null)
+            return null;
+
+        string typeName = NormalizeTypeName(ctor.DeclaringType.FullName);
+        if (string.IsNullOrEmpty(typeName))
+            return null;
+
+        string baseKey = $"M:{typeName}.#ctor";
+
+        string exact = Lookup(baseKey + "(" + BuildParameterList(ctor.GetParameters()) + ")", _returns);
+        if (!string.IsNullOrEmpty(exact))
+            return exact;
+
+        // Границы "#ctor(" и "#ctor``" обязательны: голый префикс ".#ctor" вернул бы
+        // первое попавшееся описание из словаря в неопределённом порядке обхода.
+        return LookupByPrefix(_returns, baseKey + "(", baseKey + "``");
+    }
+
+    /// <summary>
+    /// Находит описание конструктора по тегу &lt;summary&gt;.
+    /// </summary>
+    /// <param name="ctor">Конструктор, для которого нужно получить текст summary.</param>
+    /// <returns>Однострочное описание или null.</returns>
+    public string GetConstructorSummary(ConstructorInfo ctor)
+    {
+        return GetSummaryByMember(ctor == null ? null : ctor.DeclaringType, "#ctor", ctor);
+    }
+
+    /// <summary>
+    /// Находит описания параметров метода по тегам &lt;param name="..."&gt;.
+    /// </summary>
+    /// <param name="method">Метод, параметры которого нужно описать.</param>
+    /// <returns>Карта «имя параметра → описание»; пустая, если описаний нет.</returns>
+    public Dictionary<string, string> GetMethodParams(MethodInfo method)
+    {
+        return GetParamsByMember(method == null ? null : method.DeclaringType, method == null ? null : method.Name, method);
+    }
+
+    /// <summary>
+    /// Находит описания параметров конструктора по тегам &lt;param name="..."&gt;.
+    /// </summary>
+    /// <param name="ctor">Конструктор, параметры которого нужно описать.</param>
+    /// <returns>Карта «имя параметра → описание»; пустая, если описаний нет.</returns>
+    public Dictionary<string, string> GetConstructorParams(ConstructorInfo ctor)
+    {
+        return GetParamsByMember(ctor == null ? null : ctor.DeclaringType, "#ctor", ctor);
+    }
+
+    /// <summary>
+    /// Общая реализация поиска текста &lt;returns&gt; для метода или конструктора.
+    /// Дополнительный параметр methodOrCtor нужен только для построения списка типов
+    /// параметров в идентификаторе документации.
+    /// </summary>
+    private string GetReturnsByMember(Type declaringType, string memberName, MethodBase methodOrCtor)
+    {
+        if (declaringType == null || string.IsNullOrEmpty(memberName) || methodOrCtor == null)
+            return null;
+
+        string typeName = NormalizeTypeName(declaringType.FullName);
+        if (string.IsNullOrEmpty(typeName))
+            return null;
+
+        string baseKey = $"M:{typeName}.{memberName}";
+
+        ParameterInfo[] parameters;
+        try
+        {
+            parameters = methodOrCtor.GetParameters();
+        }
+        catch (Exception)
+        {
+            parameters = new ParameterInfo[0];
+        }
+
+        string exact = Lookup(baseKey + "(" + BuildParameterList(parameters) + ")", _returns);
+        if (!string.IsNullOrEmpty(exact))
+            return exact;
+
+        return LookupByPrefix(_returns, baseKey + "(", baseKey + "``");
+    }
+
+    /// <summary>
+    /// Общая реализация поиска текста &lt;summary&gt; для метода или конструктора.
+    /// </summary>
+    private string GetSummaryByMember(Type declaringType, string memberName, MethodBase methodOrCtor)
+    {
+        if (declaringType == null || string.IsNullOrEmpty(memberName) || methodOrCtor == null)
+            return null;
+
+        string typeName = NormalizeTypeName(declaringType.FullName);
+        if (string.IsNullOrEmpty(typeName))
+            return null;
+
+        string baseKey = $"M:{typeName}.{memberName}";
+
+        ParameterInfo[] parameters;
+        try
+        {
+            parameters = methodOrCtor.GetParameters();
+        }
+        catch (Exception)
+        {
+            parameters = new ParameterInfo[0];
+        }
+
+        string exact = Lookup(baseKey + "(" + BuildParameterList(parameters) + ")", _docs);
+        if (!string.IsNullOrEmpty(exact))
+            return exact;
+
+        return LookupByPrefix(_docs, baseKey + "(", baseKey + "``");
+    }
+
+    /// <summary>
+    /// Общая реализация поиска описаний параметров для метода или конструктора.
+    /// </summary>
+    private Dictionary<string, string> GetParamsByMember(Type declaringType, string memberName, MethodBase methodOrCtor)
+    {
+        var empty = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (declaringType == null || string.IsNullOrEmpty(memberName) || methodOrCtor == null)
+            return empty;
+
+        string typeName = NormalizeTypeName(declaringType.FullName);
+        if (string.IsNullOrEmpty(typeName))
+            return empty;
+
+        string baseKey = $"M:{typeName}.{memberName}";
+
+        ParameterInfo[] parameters;
+        try
+        {
+            parameters = methodOrCtor.GetParameters();
+        }
+        catch (Exception)
+        {
+            parameters = new ParameterInfo[0];
+        }
+
+        Dictionary<string, string> map;
+        if (_params.TryGetValue(baseKey + "(" + BuildParameterList(parameters) + ")", out map))
+            return map;
+
+        // Fallback: первая перегрузка с описанием параметров. Порядок обхода словаря
+        // не определён, поэтому для конструкторов вызывающий код передаёт "#ctor" —
+        // ключи конструктора уникальны и совпадение с чужой перегрузкой невозможно.
+        foreach (var pair in _params)
+        {
+            if (pair.Key.StartsWith(baseKey + "(", StringComparison.OrdinalIgnoreCase) ||
+                pair.Key.StartsWith(baseKey + "``", StringComparison.OrdinalIgnoreCase))
+                return pair.Value;
+        }
+
+        return empty;
+    }
+
+    /// <summary>
     /// Формирует список типов параметров метода в нотации идентификаторов XML-документации:
     /// полное имя типа, для массивов — суффикс "[]", для ref/out — суффикс "@",
     /// для generic-параметров — обратная кавычка с индексом ("`0").
     /// </summary>
     private static string BuildParameterList(MethodInfo method)
     {
-        ParameterInfo[] parameters;
         try
         {
-            parameters = method.GetParameters();
+            return BuildParameterList(method.GetParameters());
         }
         catch (Exception)
         {
             return string.Empty;
         }
+    }
+
+    /// <summary>
+    /// Формирует список типов параметров по массиву ParameterInfo.
+    /// Отдельная перегрузка нужна конструкторам: MethodInfo для них недоступен,
+    /// а идентификатор члена в XML-документации строится точно так же.
+    /// </summary>
+    private static string BuildParameterList(ParameterInfo[] parameters)
+    {
+        if (parameters == null || parameters.Length == 0)
+            return string.Empty;
 
         var parts = new List<string>(parameters.Length);
         foreach (var p in parameters)
@@ -1316,8 +2633,7 @@ public class XmlDocProvider
     /// </summary>
     private string Lookup(string key)
     {
-        string value;
-        return _docs.TryGetValue(key, out value) ? value : null;
+        return Lookup(key, _docs);
     }
 
     /// <summary>
@@ -1334,7 +2650,38 @@ public class XmlDocProvider
         if (prefixes == null || prefixes.Length == 0)
             return null;
 
-        foreach (var pair in _docs)
+        return LookupByPrefix(_docs, prefixes);
+    }
+
+    /// <summary>
+    /// Возвращает описание по точному ключу из указанного словаря XML-документации.
+    /// Параметр source обязателен: ранее поиск был жёстко привязан к _docs,
+    /// из-за чего текст тега &lt;returns&gt; физически не мог быть прочитан из _returns
+    /// и в вывод вместо него попадало summary (см. GetReturnsByMember).
+    /// </summary>
+    private static string Lookup(string key, Dictionary<string, string> source)
+    {
+        if (source == null)
+            return null;
+
+        string value;
+        return source.TryGetValue(key, out value) ? value : null;
+    }
+
+    /// <summary>
+    /// Возвращает первое описание из указанного словаря, ключ которого начинается
+    /// с одного из допустимых префиксов. Перегрузка с явным словарём нужна для поиска
+    /// текста &lt;returns&gt; в _returns; прежняя версия без параметра всегда читала _docs.
+    /// </summary>
+    /// <param name="source">Словарь XML-документации, в котором выполняется поиск.</param>
+    /// <param name="prefixes">Допустимые префиксы идентификаторов документации.</param>
+    /// <returns>Текст описания или null, если совпадений нет.</returns>
+    private static string LookupByPrefix(Dictionary<string, string> source, params string[] prefixes)
+    {
+        if (source == null || prefixes == null || prefixes.Length == 0)
+            return null;
+
+        foreach (var pair in source)
         {
             foreach (var prefix in prefixes)
             {
