@@ -21,6 +21,31 @@ public class ApiDumper
     public static bool CleanRagNoise = true;
 
     /// <summary>
+    /// Флаг вывода оси `api_domain` (`**Область API:**`), реестра сценариев и
+    /// раздела-разделителя «как не перепутать».
+    /// true  — справочник дополняется разметкой области API;
+    /// false — генератор работает ровно так, как до появления оси: страховка для
+    ///         быстрого отката, если новая разметка помешает RAG-конвейеру.
+    /// </summary>
+    public static bool EmitDomainMarkers = true;
+
+    /// <summary>
+    /// Флаг записи компактного манифеста области видимости (tflex_docs_api_scope.json)
+    /// рядом со справочником. Манифест содержит только сценарии, явные переопределения
+    /// и счётчики — без путей и времени, поэтому остаётся детерминированным.
+    /// </summary>
+    public static bool EmitScopeManifest = true;
+
+    /// <summary>Значение оси api_domain: администрирование модели данных.</summary>
+    private const string DomainStructure = "structure";
+
+    /// <summary>Значение оси api_domain: работа с пользовательскими данными.</summary>
+    private const string DomainObject = "object";
+
+    /// <summary>Значение оси api_domain: общие материалы, применимые к обеим задачам.</summary>
+    private const string DomainBoth = "both";
+
+    /// <summary>
     /// Дополнительные шумовые пространства имён, отсекаемые только при CleanRagNoise == true.
     /// Это внутренние настройки конфигуратора, сериализаторы пакетов обмена и слой
     /// совместимости: прикладного API, пригодного для генерации кода макроязыка, в них нет.
@@ -31,34 +56,756 @@ public class ApiDumper
         "TFlex.DOCs.Model.Configuration.Compatibility"
     };
 
+    // Прежний массив готовых строк EntryPointScenarios удалён намеренно.
+    //
+    // Причина замены: текст сценария и список проверяемых ссылок жили в разных местах —
+    // строки Markdown печатались как есть, а проверить их рефлексией было нечем. Любая
+    // правка формулировки («создать тип объектов» → «создать тип объекта») молча
+    // разъезжалась с реальным API, и справочник начинал ссылаться на несуществующие
+    // сигнатуры. Теперь источник один — ScenarioRegistry: из него рендерится Markdown
+    // (BuildScenarioSections) и по нему же идёт валидация (ValidateScenarioMembers).
+    // Формулировки прежней секции сохранены и перенесены в соответствующие сценарии.
+
     /// <summary>
-    /// Курируемая карта сценариев генерации модели данных — «точек входа» API.
-    ///
-    /// Причина появления секции: методы и типы, собирающие модель данных
-    /// (CreateReferenceBuilder, ClassObjectBuilder и т.п.), описываются в XML-документации
-    /// метафорами «Создает экземпляр класса для создания типа» и не содержат ни слова
-    /// «справочник». Векторный поиск по живому запросу «Создать справочник» такие записи
-    /// не находит: их приходилось искать точной строкой сигнатуры.
-    /// Секция перечисляет сценарий и точную пару «тип + метод», что даёт RAG
-    /// лексический и семантический якорь на естественных формулировках задачи.
+    /// Вступительный абзац реестра сценариев. Текст сохранён дословно из прежней
+    /// секции EntryPointScenarios: он объясняет читателю, зачем нужен реестр.
     /// </summary>
-    private static readonly string[] EntryPointScenarios = {
-        "## Сценарии генерации модели данных (точки входа)",
-        "",
-        "Типовые задачи генерации и изменения модели данных и соответствующие им точки входа в API. Если запрос звучит как «создать справочник», «создать тип объектов», «добавить параметр» — начинай именно с этих членов.",
-        "",
-        "- **Создать справочник:** `TFlex.DOCs.Model.ReferenceCatalog.CreateReferenceBuilder(ReferenceCatalogFolder)` → настроить `ReferenceBuilder` → `ReferenceBuilder.Save(bool)`. Ключевые слова: создать справочник, новый справочник, генерация справочника, create reference.",
-        "- **Создать папку справочников:** `TFlex.DOCs.Model.ReferenceCatalog.CreateFolder(string, ReferenceCatalogFolder)`, `ReferenceCatalog.MoveFolder(...)`.",
-        "- **Найти существующий справочник:** `ReferenceCatalog.Find(string)`, `ReferenceCatalog.FindReference(string)`, `ReferenceCatalog.FindFolderByName(string)`.",
-        "- **Создать тип объектов:** `new TFlex.DOCs.Model.Structure.Builders.ClassObjectBuilder(ClassTree)` → `ClassObjectBuilder.Save()`. Ключевые слова: создать тип объектов, новый тип объектов, класс объектов, create class object, type builder.",
-        "- **Создать производный тип объектов:** `new ClassObjectBuilder(ClassTree, ClassObject baseType)` — тип, порождённый от указанного базового типа.",
-        "- **Изменить существующий тип объектов:** `new ClassObjectBuilder(ClassTree, ClassObject existingType)` → изменить свойства → `Save()`.",
-        "- **Создать группу параметров:** `new TFlex.DOCs.Model.Structure.Builders.ParameterGroupBuilder(ClassObjectBuilder)`. Ключевые слова: создать группу параметров, группа параметров, create parameter group.",
-        "- **Создать параметр справочника:** `TFlex.DOCs.Model.Structure.Builders.ParameterInfoBuildersFactory.CreateParameterInfoBuilder(...)`, `ParameterInfoBuilder`.",
-        "- **Задать условие уникальности:** `new TFlex.DOCs.Model.Structure.Builders.UniqueIndexBuilder(ClassObjectBuilder)`. Ключевые слова: условие уникальности, уникальный индекс, unique index.",
-        "- **Создать связь (ссылочное свойство) типа объектов:** `new TFlex.DOCs.Model.Structure.Builders.LinkGroupBuilder(ParameterGroup)`.",
-        "- **Ключевые слова для поиска сценариев:** создать, создание, добавить, новый, конструктор, сформировать, настроить, изменить, справочник, тип объектов, параметр, builder, factory, create, add, new, build, generate.",
+    private const string ScenarioRegistryIntro =
+        "Типовые задачи генерации и изменения модели данных и соответствующие им точки входа в API. Если запрос звучит как «создать справочник», «создать тип объектов», «добавить параметр» — начинай именно с этих членов.";
+
+    /// <summary>
+    /// Заключительная строка реестра сценариев. Сохранена дословно из прежней секции:
+    /// это общий набор поисковых слов, применимый ко всем сценариям сразу.
+    /// </summary>
+    private const string ScenarioRegistryFooter =
+        "- **Ключевые слова для поиска сценариев:** создать, создание, добавить, новый, конструктор, сформировать, настроить, изменить, справочник, тип объектов, параметр, builder, factory, create, add, new, build, generate.";
+
+    /// <summary>
+    /// Фиксированный раздел-разделитель «как не перепутать» из шапки документа.
+    ///
+    /// Текст задан константой, а не собирается из рефлексии: это курируемое знание
+    /// о предметной области (чем администрирование модели отличается от работы
+    /// с данными), а не вывод из метаданных сборки. Раздел относится к области `both`.
+    /// </summary>
+    private static readonly string[] DomainGuideSection = {
+        "## Модель данных и пользовательские объекты: как не перепутать",
+        "- **Модель данных (structure):** создание и изменение справочников, типов объектов, параметров, групп параметров, списков 1:N, связей, индексов, форматов. Точки входа — `*Builder`/`*Factory` из `TFlex.DOCs.Model.Structure.Builders`, `ReferenceCatalog`.",
+        "- **Пользовательские объекты (object):** создание и изменение экземпляров в уже существующих справочниках и списках, заполнение параметров, связи между объектами, ревизии. Точки входа — `Reference.CreateReferenceObject`, `СоздатьОбъект`, `ObjectAccessor.СоздатьОбъектСписка`, `Parameter.Value`.",
+        "- **Правило:** «создать тип объекта» — это structure (`ClassObjectBuilder`); «создать объект» — это object (`CreateReferenceObject` / `СоздатьОбъект`). «Создать список объектов» (табличная часть 1:N) — structure (`ParameterGroupBuilder(ParameterGroupType.TableOneToMany, …)`); «создать объект в списке» — object (`СоздатьОбъектСписка`).",
         ""
+    };
+
+    /// <summary>
+    /// Одна проверяемая рефлексией ссылка сценария: тип и его член.
+    ///
+    /// Зачем отдельная сущность: сценарий ссылается на несколько членов сразу
+    /// (точка входа, продолжение, результат), и каждый нужно проверить независимо.
+    /// Пропуск сценария целиком делается только тогда, когда не найдена точка входа;
+    /// отсутствие продолжения лишь убирает один пункт из строки «Далее».
+    /// </summary>
+    private sealed class ScenarioMember
+    {
+        /// <summary>Полное имя типа, полученное из рефлексии (не «на глаз»).</summary>
+        public string TypeFullName;
+
+        /// <summary>Имя метода или свойства; null означает конструктор.</summary>
+        public string Member;
+
+        /// <summary>Человекочитаемое представление для строки отчёта о пропуске.</summary>
+        public string Display;
+    }
+
+    /// <summary>
+    /// Сценарий работы с API: то, что пользователь формулирует словами, и точные
+    /// члены, которыми он реализуется.
+    ///
+    /// Структурированная форма нужна ровно потому, что строка Markdown не поддаётся
+    /// проверке: рефлексия не может провалидировать текст. Здесь текст и проверяемые
+    /// ссылки лежат рядом, поэтому формулировка и API не могут разъехаться молча.
+    /// </summary>
+    private sealed class ScenarioDefinition
+    {
+        /// <summary>Стабильный ключ сценария в kebab-case (используется как ключ в RAG).</summary>
+        public string Id;
+
+        /// <summary>Название сценария для секции `**Сценарий:**`.</summary>
+        public string Title;
+
+        /// <summary>Область API сценария: structure | object | both.</summary>
+        public string Domain;
+
+        /// <summary>Уровень API сценария: macro | core .</summary>
+        public string Level;
+
+        /// <summary>Готовая строка «точка входа» — только проверенные сигнатуры.</summary>
+        public string EntryPoint;
+
+        /// <summary>Результат сценария (имя типа) либо null, если результат не выражен типом.</summary>
+        public string Result;
+
+        /// <summary>Продолжения сценария: строки, часть которых может быть удалена валидацией.</summary>
+        public string[] Next;
+
+        /// <summary>Поисковые формулировки сценария.</summary>
+        public string[] Keywords;
+
+        /// <summary>Пояснения «не путать с» — предметная анти-подсказка для RAG.</summary>
+        public string[] ConfusableWith;
+
+        /// <summary>Ссылки сценария, проверяемые рефлексией при генерации.</summary>
+        public ScenarioMember[] Members;
+    }
+
+    /// <summary>
+    /// Создаёт проверяемую ссылку сценария. Вынесено в метод, чтобы записи реестра
+    /// не разрастались повторами полного имени типа в строке отчёта.
+    /// </summary>
+    private static ScenarioMember Sm(string typeFullName, string member)
+    {
+        return new ScenarioMember
+        {
+            TypeFullName = typeFullName,
+            Member = member,
+            Display = member == null ? typeFullName + ".#ctor" : typeFullName + "." + member
+        };
+    }
+
+    /// <summary>
+    /// Полные имена типов и членов, на которые опирается реестр сценариев.
+    /// Собраны в константы, чтобы опечатка в длинном имени не расползлась по реестру
+    /// и не превратилась в «несуществующий API» после подстановки.
+    /// </summary>
+    private const string TBuilders = "TFlex.DOCs.Model.Structure.Builders.";
+    private const string TClassObjectBuilder = TBuilders + "ClassObjectBuilder";
+    private const string TParameterGroupBuilder = TBuilders + "ParameterGroupBuilder";
+    private const string TParameterInfoBuilder = TBuilders + "ParameterInfoBuilder";
+    private const string TLinkGroupBuilder = TBuilders + "LinkGroupBuilder";
+    private const string TUniqueIndexBuilder = TBuilders + "UniqueIndexBuilder";
+    private const string TReferenceBuilder = TBuilders + "ReferenceBuilder";
+    private const string TExtendedStorageBuilder = TBuilders + "ExtendedParametersStorageBuilder";
+    private const string TRefCatalog = "TFlex.DOCs.Model.ReferenceCatalog";
+    private const string TRefCatalogFolder = "TFlex.DOCs.Model.ReferenceCatalogFolder";
+    private const string TClassTree = "TFlex.DOCs.Model.Classes.ClassTree";
+    private const string TClassObject = "TFlex.DOCs.Model.Classes.ClassObject";
+    private const string TParameterGroup = "TFlex.DOCs.Model.Structure.ParameterGroup";
+    private const string TParameterGroupType = "TFlex.DOCs.Model.Structure.ParameterGroupType";
+    private const string TUniqueIndex = "TFlex.DOCs.Model.Structure.UniqueIndex";
+    private const string TParameterInfo = "TFlex.DOCs.Model.Structure.ParameterInfo";
+    private const string TReference = "TFlex.DOCs.Model.References.Reference";
+    private const string TReferenceObject = "TFlex.DOCs.Model.References.ReferenceObject";
+    private const string TDesktopObject = "TFlex.DOCs.Model.References.DesktopObject";
+    private const string TMacroProvider = "TFlex.DOCs.Model.Macros.MacroProvider";
+    private const string TObjectAccessor = "TFlex.DOCs.Model.Macros.ObjectModel.ObjectAccessor";
+    private const string TParameter = "TFlex.DOCs.Model.Parameters.Parameter";
+    private const string TParameterCollection = "TFlex.DOCs.Model.Parameters.ParameterCollection";
+
+    /// <summary>
+    /// Курируемый реестр сценариев API.
+    ///
+    /// Сценарий — это то, как задачу формулирует человек («создать тип объекта»),
+    /// вместе с точными членами, которыми она решается. Прежний массив строк
+    /// EntryPointScenarios содержал только текст, поэтому ни одна формулировка
+    /// не была связана с реальным API и не проверялась.
+    ///
+    /// Все перечисленные ниже члены подтверждены рефлексией по сборкам поставки
+    /// T-FLEX DOCs 18. Ни один не «вероятен».
+    /// </summary>
+    private static readonly ScenarioDefinition[] ScenarioRegistry = {
+        new ScenarioDefinition {
+            Id = "apply-changes",
+            Title = "Сохранить изменения",
+            Domain = DomainBoth,
+            Level = "both",
+            EntryPoint = "`ReferenceObject.EndChanges()`, `ReferenceObject.ApplyChanges()`, `ObjectAccessor.Save()`; для модели данных — `ClassObjectBuilder.Save()`, `ParameterGroupBuilder.Save()`, `ReferenceBuilder.Save(bool)`",
+            Result = null,
+            Next = new[] {
+                "`ReferenceObject.BeginChanges()` — начать пакет изменений",
+                "`ReferenceObject.CancelChanges()` — отменить пакет изменений",
+                "`DesktopObject.EndChanges()` — зафиксировать изменения контейнера"
+            },
+            Keywords = new[] {
+                "сохранить изменения", "зафиксировать изменения", "применить изменения", "commit", "save changes", "apply changes"
+            },
+            ConfusableWith = new[] {
+                "`Save()` (structure) — сохранение элемента модели данных (builder); `EndChanges()` (object) — фиксация изменений экземпляра объекта"
+            },
+            Members = new[] {
+                Sm(TReferenceObject, "EndChanges"), Sm(TReferenceObject, "ApplyChanges"),
+                Sm(TReferenceObject, "BeginChanges"), Sm(TReferenceObject, "CancelChanges"),
+                Sm(TObjectAccessor, "Save"), Sm(TDesktopObject, "EndChanges"),
+                Sm(TClassObjectBuilder, "Save"), Sm(TParameterGroupBuilder, "Save"), Sm(TReferenceBuilder, "Save")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-class-object",
+            Title = "Создать тип объекта (класс объектов)",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`new TFlex.DOCs.Model.Structure.Builders.ClassObjectBuilder(ClassTree)` → `ClassObjectBuilder.Save()`. Ключевые слова: создать тип объектов, новый тип объектов, класс объектов, create class object, type builder",
+            Result = "ClassObject",
+            Next = new[] {
+                "`ClassObjectBuilder.ParameterGroups` — группы параметров нового типа",
+                "`ParameterInfoBuilder` — параметры типа",
+                "`LinkGroupBuilder` — связи типа объектов"
+            },
+            Keywords = new[] {
+                "создать тип объекта", "создать тип объектов", "новый тип объектов", "класс объектов", "create class object", "type builder"
+            },
+            ConfusableWith = new[] {
+                "`create-reference-object` (core, object) — создание объекта справочника: `Reference.CreateReferenceObject(...)`",
+                "`СоздатьОбъект` (macro, object) — создание экземпляра объекта в макроязыке"
+            },
+            Members = new[] {
+                Sm(TClassObjectBuilder, null), Sm(TClassObjectBuilder, "Save"),
+                Sm(TClassObjectBuilder, "ParameterGroups"), Sm(TClassTree, "Find")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-derived-class-object",
+            Title = "Создать производный тип объекта",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`new ClassObjectBuilder(ClassTree, ClassObject baseType)` — тип, порождённый от указанного базового типа",
+            Result = "ClassObject",
+            Next = new[] {
+                "`ClassObjectBuilder.Base` — базовый тип, от которого порождён новый",
+                "`ClassObjectBuilder.Save()` — сохранение типа"
+            },
+            Keywords = new[] {
+                "создать производный тип объекта", "наследник типа объекта", "базовый тип объекта", "derived class object"
+            },
+            ConfusableWith = new[] {
+                "`create-class-object` (structure) — создание типа объектов «с нуля», без базового типа"
+            },
+            Members = new[] {
+                Sm(TClassObjectBuilder, null), Sm(TClassObjectBuilder, "Base"),
+                Sm(TClassObjectBuilder, "Save"), Sm(TClassObject, "Name")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-extended-storage",
+            Title = "Создать хранилище расширенных параметров",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`new TFlex.DOCs.Model.Structure.Builders.ExtendedParametersStorageBuilder(ServerConnection connection)` → задать `Name` и `Comment`",
+            Result = "ExtendedParametersStorage",
+            Next = new[] {
+                "`ExtendedParametersStorageBuilder.ValuesStorage` — созданное хранилище",
+                "`ExtendedParametersManager.AttachExtendedParameterToParameterGroup(ParameterInfo, ParameterGroup)` — подключение расширенного параметра к группе"
+            },
+            Keywords = new[] {
+                "создать хранилище параметров", "расширенные параметры справочника", "хранилище расширенных параметров"
+            },
+            ConfusableWith = new[] {
+                "`create-parameter` (structure) — создание обычного параметра справочника; расширенный параметр подключается к уже существующей группе"
+            },
+            Members = new[] {
+                Sm(TExtendedStorageBuilder, null), Sm(TExtendedStorageBuilder, "ValuesStorage"),
+                Sm(TExtendedStorageBuilder, "Name"), Sm(TRefCatalog, "Find")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-link-group",
+            Title = "Создать связь (ссылочное свойство) типа объектов",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`new TFlex.DOCs.Model.Structure.Builders.LinkGroupBuilder(ParameterGroup group)` → `LinkGroupBuilder.Save()`",
+            Result = "ParameterGroup",
+            Next = new[] {
+                "`LinkGroupBuilder.LinkType` — вид связи",
+                "`LinkGroupBuilder.SlaveGroup` — группа-приёмник связи"
+            },
+            Keywords = new[] {
+                "создать связь", "создать ссылочное свойство", "добавить связь типа объектов", "link group"
+            },
+            ConfusableWith = new[] {
+                "`link-objects` (object) — связывание двух существующих объектов: `ReferenceObject.CreateChildLink`, `ReferenceObject.CreateParentLink`, `DesktopObject.SetLinkedObject`"
+            },
+            Members = new[] {
+                Sm(TLinkGroupBuilder, null), Sm(TLinkGroupBuilder, "Save"),
+                Sm(TLinkGroupBuilder, "LinkType"), Sm(TLinkGroupBuilder, "SlaveGroup"),
+                Sm(TParameterGroup, "Type")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-list-object",
+            Title = "Создать объект в существующем списке",
+            Domain = DomainObject,
+            Level = "both",
+            EntryPoint = "`ObjectAccessor.СоздатьОбъектСписка(String имяСпискаОбъектов)` → `ObjectAccessor.Save()`; в макроязыке — `RefObj CreateListObject(String)`",
+            Result = "RefObj",
+            Next = new[] {
+                "`ObjectAccessor.СоздатьОбъектСписка(String, String)` — с указанием имени списка и типа",
+                "`ObjectAccessor.Save()` — сохранение созданного объекта"
+            },
+            Keywords = new[] {
+                "создать объект в списке", "создать строку списка", "добавить объект в список объектов", "СоздатьОбъектСписка"
+            },
+            ConfusableWith = new[] {
+                "`create-object-list` (structure) — создание самой табличной части 1:N: `ParameterGroupBuilder(ParameterGroupType.TableOneToMany, ...)`, `ParameterGroupBuilder.Save()`"
+            },
+            Members = new[] {
+                Sm(TObjectAccessor, "СоздатьОбъектСписка"), Sm(TObjectAccessor, "Save"),
+                Sm(TObjectAccessor, "CreateListObject"), Sm(TDesktopObject, "CreateListObject")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-macro-object",
+            Title = "Создать объект в макроязыке",
+            Domain = DomainObject,
+            Level = "macro",
+            EntryPoint = "`MacroProvider.СоздатьОбъект(String справочник)`, `MacroProvider.CreateObject(String referenceName)` → `ObjectAccessor.Save()`",
+            Result = "RefObj",
+            Next = new[] {
+                "`MacroProvider.СоздатьОбъект(String, String имяТипа)` — с указанием типа объекта",
+                "`MacroProvider.СоздатьОбъект(String, ТипОбъекта)` — с указанием типа как значения",
+                "`ObjectAccessor.Тип` / `ObjectAccessor.Reference` — проверка созданного объекта"
+            },
+            Keywords = new[] {
+                "создать объект", "создать объект справочника в макроязыке", "СоздатьОбъект", "CreateObject", "macro object"
+            },
+            ConfusableWith = new[] {
+                "`create-reference-object` (core, object) — низкоуровневое создание объекта: `Reference.CreateReferenceObject(...)`",
+                "`create-class-object` (core, structure) — создание типа объекта (класса), а не экземпляра"
+            },
+            Members = new[] {
+                Sm(TMacroProvider, "СоздатьОбъект"), Sm(TMacroProvider, "CreateObject"),
+                Sm(TObjectAccessor, "Save")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-object-list",
+            Title = "Создать подчинённый список объектов 1:N (табличная часть, список строк)",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`new ParameterGroupBuilder(ParameterGroupType.TableOneToMany, ParameterGroup parentGroup, ClassObject ownerClass)` → `ParameterGroupBuilder.Save()`; далее `ParameterGroupBuilder.ParameterGroup`, `ParameterGroup.Classes`, `new ClassObjectBuilder(ClassObjectCollection)` → `Save()`, `new ParameterInfoBuilder(ParameterGroup)` → `Save()`",
+            Result = "ParameterGroup (список), ClassObject (класс строк)",
+            Next = new[] {
+                "`ParameterInfoBuilder` для каждой колонки",
+                "`ClassObjectBuilder` для класса строк"
+            },
+            Keywords = new[] {
+                "создать список объектов", "подчинённый список", "табличная часть", "список строк", "строки таблицы",
+                "таблица 1:N", "один ко многим", "TableOneToMany", "ParameterGroupBuilder", "ParameterInfoBuilder", "ClassObjectBuilder"
+            },
+            ConfusableWith = new[] {
+                "`create-list-object` (object) — создание экземпляра строки в уже существующем списке: `ObjectAccessor.СоздатьОбъектСписка`, `DesktopObject.CreateListObject`"
+            },
+            Members = new[] {
+                Sm(TParameterGroupBuilder, null), Sm(TParameterGroupBuilder, "Save"),
+                Sm(TParameterGroupBuilder, "ParameterGroup"), Sm(TParameterGroup, "Classes"),
+                Sm(TClassObjectBuilder, null), Sm(TClassObjectBuilder, "Save"),
+                Sm(TParameterInfoBuilder, null), Sm(TParameterInfoBuilder, "Save"),
+                Sm(TParameterGroupType, "TableOneToMany")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-parameter",
+            Title = "Создать параметр справочника",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`TFlex.DOCs.Model.Structure.Builders.ParameterInfoBuildersFactory.CreateParameterInfoBuilder(...)`, `new TFlex.DOCs.Model.Structure.Builders.ParameterInfoBuilder(ParameterGroup)` → `ParameterInfoBuilder.Save()`",
+            Result = "ParameterInfo",
+            Next = new[] {
+                "`ParameterInfoBuilder.Type` — тип параметра (`ParameterType`)",
+                "`ParameterInfoBuilder.Name` — имя параметра",
+                "`ParameterInfo.Type` — тип созданного параметра"
+            },
+            Keywords = new[] {
+                "создать параметр", "создать параметр справочника", "добавить параметр", "создание параметра", "create parameter", "parameter builder"
+            },
+            ConfusableWith = new[] {
+                "`fill-parameter` (object) — запись значения уже существующего параметра экземпляра объекта: `Parameter.Value`",
+                "`read-parameter` (object) — чтение значения: `Parameter.Value`, `Parameter.GetString()`"
+            },
+            Members = new[] {
+                Sm(TParameterInfoBuilder, null), Sm(TParameterInfoBuilder, "Save"),
+                Sm(TParameterGroupBuilder, "ParameterGroup"), Sm(TParameterInfo, "Type"),
+                Sm(TParameterGroup, "Parameters")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-parameter-group",
+            Title = "Создать группу параметров",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`new TFlex.DOCs.Model.Structure.Builders.ParameterGroupBuilder(ParameterGroup masterGroup, ClassObject tableClass, ParameterGroup sourceTable)` → `ParameterGroupBuilder.Save()`. Ключевые слова: создать группу параметров, группа параметров, create parameter group",
+            Result = "ParameterGroup",
+            Next = new[] {
+                "`new ParameterGroupBuilder(ParameterGroupType type, ParameterGroup masterGroup, ClassObject classObject)` — группа заданного вида",
+                "`ParameterInfoBuilder` — параметры внутри группы",
+                "`ParameterGroup.Parameters` — параметры созданной группы"
+            },
+            Keywords = new[] {
+                "создать группу параметров", "добавить группу параметров", "создание группы параметров", "create parameter group", "parameter group builder"
+            },
+            ConfusableWith = new[] {
+                "`create-object-list` (structure) — подчинённый список 1:N: та же точка входа с `ParameterGroupType.TableOneToMany`"
+            },
+            Members = new[] {
+                Sm(TParameterGroupBuilder, null), Sm(TParameterGroupBuilder, "Save"),
+                Sm(TParameterGroupBuilder, "ParameterGroup"), Sm(TParameterGroup, "Parameters"),
+                Sm(TClassObjectBuilder, "ParameterGroups")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-reference",
+            Title = "Создать справочник",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`TFlex.DOCs.Model.ReferenceCatalog.CreateReferenceBuilder(ReferenceCatalogFolder)` → настроить `ReferenceBuilder` → `ReferenceBuilder.Save(bool)`. Ключевые слова: создать справочник, новый справочник, генерация справочника, create reference",
+            Result = "Reference",
+            Next = new[] {
+                "`ReferenceBuilder.RevisionNamingRule` — правило именования ревизий",
+                "`ReferenceBuilder.HierarchyType` — вид иерархии",
+                "`ClassObjectBuilder` — типы объектов нового справочника"
+            },
+            Keywords = new[] {
+                "создать справочник", "новый справочник", "генерация справочника", "create reference", "reference builder"
+            },
+            ConfusableWith = new[] {
+                "`create-reference-object` (object) — создание объекта внутри уже существующего справочника"
+            },
+            Members = new[] {
+                Sm(TRefCatalog, "CreateReferenceBuilder"), Sm(TReferenceBuilder, null),
+                Sm(TReferenceBuilder, "Save"), Sm(TReferenceBuilder, "Folder")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-reference-folder",
+            Title = "Создать папку каталога справочников",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`ReferenceCatalog.CreateFolder(string name, ReferenceCatalogFolder parent)`, `ReferenceCatalogFolder.CreateFolder(String)`",
+            Result = "ReferenceCatalogFolder",
+            Next = new[] {
+                "`ReferenceCatalogFolder.CreateFolder(String)` — вложенная папка",
+                "`ReferenceCatalogFolder.Rename(String)` — переименование папки",
+                "`ReferenceCatalog.MoveFolder(ReferenceCatalogFolder, ReferenceCatalogFolder)` — перемещение папки"
+            },
+            Keywords = new[] {
+                "создать папку справочников", "папка каталога справочников", "создать папку каталога"
+            },
+            ConfusableWith = new[] {
+                "`create-reference` (structure) — создание самого справочника, а не папки каталога"
+            },
+            Members = new[] {
+                Sm(TRefCatalog, "CreateFolder"), Sm(TRefCatalogFolder, "CreateFolder"),
+                Sm(TRefCatalog, "MoveFolder"), Sm(TRefCatalogFolder, "Rename"),
+                Sm(TRefCatalogFolder, "Name")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-reference-object",
+            Title = "Создать объект справочника",
+            Domain = DomainObject,
+            Level = "core",
+            EntryPoint = "`Reference.CreateReferenceObject()`, `Reference.CreateReferenceObject(ClassObject)`, `Reference.CreateReferenceObject(ReferenceObject)`, `Reference.CreateReferenceObject(ReferenceObject, ClassObject)`",
+            Result = "ReferenceObject",
+            Next = new[] {
+                "`ReferenceObject.BeginChanges()` / `ReferenceObject.EndChanges()` — запись значений параметров",
+                "`ReferenceObject.ParameterValues` — параметры созданного объекта",
+                "`ReferenceObject.ApplyChanges()` — применение изменений"
+            },
+            Keywords = new[] {
+                "создать объект справочника", "создать экземпляр объекта", "новый объект справочника", "CreateReferenceObject"
+            },
+            ConfusableWith = new[] {
+                "`create-class-object` (structure) — создание типа объекта, а не экземпляра",
+                "`create-macro-object` (macro, object) — то же действие через макроязык: `СоздатьОбъект`"
+            },
+            Members = new[] {
+                Sm(TReference, "CreateReferenceObject"), Sm(TReferenceObject, "BeginChanges"),
+                Sm(TReferenceObject, "EndChanges"), Sm(TReferenceObject, "ApplyChanges"),
+                Sm(TReference, "Classes")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-revision",
+            Title = "Создать ревизию объекта",
+            Domain = DomainObject,
+            Level = "core",
+            EntryPoint = "`ReferenceObject.CreateRevision(RevisionLevelObject level, ReferenceObject source, Boolean recursive, Boolean copyApplicability)`",
+            Result = "ReferenceObject",
+            Next = new[] {
+                "`ReferenceObject.GetRevisions()` — список ревизий объекта",
+                "`ReferenceBuilder.RevisionNamingRule` — правило именования ревизий справочника"
+            },
+            Keywords = new[] {
+                "создать ревизию", "новая ревизия объекта", "create revision"
+            },
+            ConfusableWith = new[] {
+                "`apply-changes` (both) — сохранение изменений объекта; ревизия создаётся отдельным вызовом `CreateRevision`"
+            },
+            Members = new[] {
+                Sm(TReferenceObject, "CreateRevision"), Sm(TReferenceObject, "GetRevisions"),
+                Sm(TReferenceBuilder, "RevisionNamingRule")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "create-unique-index",
+            Title = "Задать условие уникальности",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`new TFlex.DOCs.Model.Structure.Builders.UniqueIndexBuilder(ParameterGroup parameterGroup)` → `UniqueIndexBuilder.Save()`. Ключевые слова: условие уникальности, уникальный индекс, unique index",
+            Result = "UniqueIndex",
+            Next = new[] {
+                "`UniqueIndexBuilder.Parameters` — набор параметров условия",
+                "`UniqueIndex.Parameters` — параметры созданного индекса",
+                "`UniqueIndex.Group` — группа параметров индекса"
+            },
+            Keywords = new[] {
+                "условие уникальности", "уникальный индекс", "уникальность типа объекта", "unique index"
+            },
+            ConfusableWith = new[] {
+                "`create-parameter-group` (structure) — создание группы параметров, к которой затем привязывается индекс"
+            },
+            Members = new[] {
+                Sm(TUniqueIndexBuilder, null), Sm(TUniqueIndexBuilder, "Save"),
+                Sm(TUniqueIndexBuilder, "Parameters"), Sm(TUniqueIndex, "Parameters"),
+                Sm(TUniqueIndex, "Group"), Sm(TClassObjectBuilder, "UniqueIndex")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "edit-class-object",
+            Title = "Изменить существующий тип объекта",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`new ClassObjectBuilder(ClassTree, ClassObject existingType)` → изменить свойства → `Save()`",
+            Result = "ClassObject",
+            Next = new[] {
+                "`ClassObjectBuilder.Name` — переименование типа",
+                "`ClassObjectBuilder.Comment` — описание типа",
+                "`ClassObjectBuilder.Save()` — сохранение изменений"
+            },
+            Keywords = new[] {
+                "изменить тип объекта", "изменить тип объектов", "редактировать класс объектов", "rename class object"
+            },
+            ConfusableWith = new[] {
+                "`create-derived-class-object` (structure) — та же точка входа, но тип создаётся порождённым от базового, а не редактируется"
+            },
+            Members = new[] {
+                Sm(TClassObjectBuilder, null), Sm(TClassObjectBuilder, "Name"),
+                Sm(TClassObjectBuilder, "Comment"), Sm(TClassObjectBuilder, "Save"),
+                Sm(TClassTree, "Find")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "fill-parameter",
+            Title = "Заполнить параметр",
+            Domain = DomainObject,
+            Level = "both",
+            EntryPoint = "`Parameter.Value` (запись); в макроязыке — `ObjectAccessor.Parameter` → `ParameterAccessor`",
+            Result = null,
+            Next = new[] {
+                "`ReferenceObject.BeginChanges()` — начать изменения",
+                "`ReferenceObject.EndChanges()` — зафиксировать значение",
+                "`Parameter.SetModified()` — пометить параметр изменённым"
+            },
+            Keywords = new[] {
+                "заполнить параметр", "записать значение параметра", "изменить значение параметра", "set parameter value"
+            },
+            ConfusableWith = new[] {
+                "`create-parameter` (structure) — создание самого параметра в модели данных, а не запись его значения",
+                "`read-parameter` (object) — чтение значения того же параметра"
+            },
+            Members = new[] {
+                Sm(TParameter, "Value"), Sm(TParameter, "SetModified"),
+                Sm(TParameterCollection, "GetParameter"), Sm(TReferenceObject, "EndChanges")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "find-object",
+            Title = "Найти объект",
+            Domain = DomainObject,
+            Level = "both",
+            EntryPoint = "`MacroProvider.FindObject(String referenceName, String filter)`, `Reference.Find(String)`, `Reference.Find(ParameterInfo, Object)`",
+            Result = "ReferenceObject",
+            Next = new[] {
+                "`MacroProvider.FindObjects(String referenceName, String filter)` — список найденных объектов",
+                "`Reference.Find(Filter, MacroContext)` — поиск по фильтру",
+                "`DesktopObject.GetObject(Guid)` — объект из контейнера"
+            },
+            Keywords = new[] {
+                "найти объект", "поиск объекта", "найти объект по параметру", "find object"
+            },
+            ConfusableWith = new[] {
+                "`find-reference` (structure) — поиск самого справочника в каталоге, а не объекта в нём"
+            },
+            Members = new[] {
+                Sm(TMacroProvider, "FindObject"), Sm(TMacroProvider, "FindObjects"),
+                Sm(TReference, "Find"), Sm(TDesktopObject, "GetObject")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "find-reference",
+            Title = "Найти существующий справочник",
+            Domain = DomainStructure,
+            Level = "core",
+            EntryPoint = "`ReferenceCatalog.Find(string)`, `ReferenceCatalog.FindReference(string)`, `ReferenceCatalog.FindFolderByName(string)`",
+            Result = "ReferenceInfo",
+            Next = new[] {
+                "`ReferenceCatalogFolder.References` — справочники внутри найденной папки",
+                "`ReferenceCatalog.GetAllReferences()` — полный список справочников"
+            },
+            Keywords = new[] {
+                "найти справочник", "найти существующий справочник", "поиск справочника"
+            },
+            ConfusableWith = new[] {
+                "`find-object` (object) — поиск объекта внутри справочника, а не самого справочника"
+            },
+            Members = new[] {
+                Sm(TRefCatalog, "Find"), Sm(TRefCatalog, "FindReference"),
+                Sm(TRefCatalog, "FindFolderByName"), Sm(TRefCatalog, "GetAllReferences"),
+                Sm(TRefCatalogFolder, "References")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "link-objects",
+            Title = "Связать объекты",
+            Domain = DomainObject,
+            Level = "core",
+            EntryPoint = "`ReferenceObject.CreateChildLink(ReferenceObject)`, `ReferenceObject.CreateParentLink(ReferenceObject)`, `DesktopObject.SetLinkedObject(ParameterGroup, ReferenceObject)`",
+            Result = "ComplexHierarchyLink",
+            Next = new[] {
+                "`ReferenceObject.GetChildLink(ReferenceObject)` — получить существующее дочернее подключение",
+                "`DesktopObject.AddLinkedObject(ParameterGroup, ReferenceObject)` — добавить связанный объект",
+                "`ReferenceObject.DeleteLink(ComplexHierarchyLink)` — удалить подключение"
+            },
+            Keywords = new[] {
+                "связать объекты", "создать связь между объектами", "подключить объект", "link objects"
+            },
+            ConfusableWith = new[] {
+                "`create-link-group` (structure) — создание связи как элемента модели данных: `LinkGroupBuilder`, а не связывание двух экземпляров"
+            },
+            Members = new[] {
+                Sm(TReferenceObject, "CreateChildLink"), Sm(TReferenceObject, "CreateParentLink"),
+                Sm(TDesktopObject, "SetLinkedObject"), Sm(TDesktopObject, "AddLinkedObject"),
+                Sm(TReferenceObject, "DeleteLink"), Sm(TParameterGroup, "Type")
+            }
+        },
+        new ScenarioDefinition {
+            Id = "read-parameter",
+            Title = "Прочитать значение параметра",
+            Domain = DomainObject,
+            Level = "both",
+            EntryPoint = "`Parameter.Value` (чтение); `Parameter.GetString()`, `Parameter.GetValue()`",
+            Result = null,
+            Next = new[] {
+                "`ParameterCollection.GetParameter(ParameterInfo)` — получить параметр по описанию",
+                "`ParameterCollection.GetParameter(Int32)` — получить параметр по идентификатору",
+                "`ReferenceObject.ParameterValues` — коллекция параметров объекта"
+            },
+            Keywords = new[] {
+                "прочитать значение параметра", "получить значение параметра", "значение параметра", "read parameter value"
+            },
+            ConfusableWith = new[] {
+                "`fill-parameter` (object) — запись значения того же параметра",
+                "`create-parameter` (structure) — создание параметра в модели данных"
+            },
+            Members = new[] {
+                Sm(TParameter, "Value"), Sm(TParameter, "GetString"),
+                Sm(TParameter, "GetValue"), Sm(TParameterCollection, "GetParameter")
+            }
+        }
+    };
+
+    /// <summary>
+    /// Явная таблица доменов по ПОЛНОМУ имени типа — высший приоритет классификации (§5.1).
+    ///
+    /// Сопоставление идёт по полному имени, а не по простому: короткие имена в этих
+    /// сборках неоднозначны (`Parameter` существует ещё и в `TFlex.DOCs.Common.Expressions`,
+    /// а `Reference`/`ReferenceObject` — во вложенных типах `SystemAccessGroups`).
+    /// Ключ по полному имени исключает привязку к чужому типу.
+    /// </summary>
+    private static readonly Dictionary<string, string> ExplicitTypeDomains =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "TFlex.DOCs.Model.ReferenceCatalog", DomainStructure },
+            { "TFlex.DOCs.Model.ReferenceCatalogFolder", DomainStructure },
+
+            { TBuilders + "ReferenceBuilder", DomainStructure },
+            { TBuilders + "ClassObjectBuilder", DomainStructure },
+            { TBuilders + "ParameterGroupBuilder", DomainStructure },
+            { TBuilders + "ParameterInfoBuilder", DomainStructure },
+            { TBuilders + "ExtendedParameterInfoBuilder", DomainStructure },
+            { TBuilders + "AliasedParameterInfoBuilder", DomainStructure },
+            { TBuilders + "LinkGroupBuilder", DomainStructure },
+            { TBuilders + "UniqueIndexBuilder", DomainStructure },
+            { TBuilders + "ExtendedParametersStorageBuilder", DomainStructure },
+            { TBuilders + "ObjectFormatBuilder", DomainStructure },
+            { TBuilders + "ObjectParameterFormatBuilder", DomainStructure },
+
+            { "TFlex.DOCs.Model.Classes.ClassTree", DomainStructure },
+            { "TFlex.DOCs.Model.Classes.ClassObject", DomainStructure },
+            { "TFlex.DOCs.Model.Structure.ParameterInfo", DomainStructure },
+            { "TFlex.DOCs.Model.Structure.UniqueIndex", DomainStructure },
+            { "TFlex.DOCs.Model.Structure.ParameterGroupType", DomainStructure },
+
+            // Группа параметров описывает модель, но через неё же читаются значения,
+            // поэтому она осознанно отнесена к общим материалам.
+            { "TFlex.DOCs.Model.Structure.ParameterGroup", DomainBoth },
+
+            { "TFlex.DOCs.Model.References.Reference", DomainObject },
+            { "TFlex.DOCs.Model.References.ReferenceObject", DomainObject },
+            { "TFlex.DOCs.Model.References.Files.FileReferenceObject", DomainObject },
+
+            { "TFlex.DOCs.Model.Parameters.Parameter", DomainObject },
+            { "TFlex.DOCs.Model.Parameters.ParameterCollection", DomainObject },
+            { "TFlex.DOCs.Model.Macros.ObjectModel.ParameterAccessor", DomainObject },
+
+            { "TFlex.DOCs.Model.Macros.ObjectModel.ObjectAccessor", DomainObject },
+            { "TFlex.DOCs.Model.Macros.ObjectModel.RefObj", DomainObject },
+            { "TFlex.DOCs.Model.Macros.ObjectModel.RefObjList", DomainObject },
+
+            { "TFlex.DOCs.Model.Access.AccessManager", DomainBoth }
+        };
+
+    /// <summary>
+    /// Явные переопределения домена на уровне члена: ключ «ПолноеИмяТипа.Член» (§5.2, п. 3 и 5).
+    ///
+    /// Нужны там, где правило по имени дало бы неверный ответ: `ReferenceObject.*`
+    /// и `ParameterCollection.*` формально подпадают под «имя содержит Model/Settings»,
+    /// но по смыслу это работа с данными. Каждая запись обязана существовать в сборке —
+    /// несуществующая печатает предупреждение (см. ValidateMemberDomainOverrides).
+    /// </summary>
+    private static readonly Dictionary<string, string> ExplicitMemberDomains =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { TReference + ".CreateReferenceObject", DomainObject },
+            { TParameter + ".Value", DomainObject },
+            { TObjectAccessor + ".СоздатьОбъектСписка", DomainObject },
+            { TDesktopObject + ".CreateListObject", DomainObject },
+            { TDesktopObject + ".SetLinkedObject", DomainObject },
+            { TDesktopObject + ".AddLinkedObject", DomainObject },
+            { TReferenceObject + ".CreateRevision", DomainObject },
+            { TReferenceObject + ".CreateChildLink", DomainObject },
+            { TReferenceObject + ".CreateParentLink", DomainObject },
+            { TReferenceObject + ".GetRevisions", DomainObject },
+            { TReferenceObject + ".DeleteLink", DomainObject },
+            { TReferenceObject + ".SetSignature", DomainObject },
+            { TMacroProvider + ".СоздатьОбъект", DomainObject },
+            { TMacroProvider + ".CreateObject", DomainObject },
+            { TMacroProvider + ".FindObject", DomainObject },
+            { TMacroProvider + ".FindObjects", DomainObject },
+            { TParameterCollection + ".GetParameter", DomainObject },
+            { TParameter + ".GetString", DomainObject },
+            { TParameter + ".GetValue", DomainObject },
+            { TParameter + ".SetModified", DomainObject }
+        };
+
+    /// <summary>
+    /// Префиксы пространств имён, целиком относящихся к модели данных (правило §5.1 по namespace).
+    /// </summary>
+    private static readonly string[] StructureNamespacePrefixes = {
+        "TFlex.DOCs.Model.Structure"
+    };
+
+    /// <summary>
+    /// Префиксы пространств имён макроязыка: это пользовательские данные, а не модель (§5.1).
+    /// </summary>
+    private static readonly string[] ObjectNamespacePrefixes = {
+        "TFlex.DOCs.Model.Macros"
     };
 
     /// <summary>
@@ -127,14 +874,62 @@ public class ApiDumper
 
         var sb = new StringBuilder();
         sb.AppendLine("# Справочник API T-FLEX DOCs (с пространствами имён)");
-        sb.AppendLine("> Используй указанные `Namespace` для добавления в `using`. Строка `**Уровень API:**` отделяет прикладной Macro DSL (доступно внутри MacroProvider) от низкоуровневого Core Open API; пометка `Core Open API (генерация модели данных)` — это типы-конструкторы (Builder/Factory), через которые собирается модель данных. Пометка [RU: …] — русскоязычный алиас метода или свойства, найденный зеркалированием по идентичному тексту `<summary>` в XML-документации; [RU only] — член, существующий только в русскоязычном алиасе; [унаследовано] — член, полученный от базового класса коллекции макромодели. Каждый метод выводится отдельной секцией `#### [Method]`, каждый конструктор — секцией `#### [Constructor]`; в чанке доступны строки `**Алиасы:**`, `**RU only**`, `**Async**`, `**Возвращает:**` (выводится только когда текст `<returns>` описывает результат, а не пересказывает summary), `**Назначение:**`, `**Ключевые слова:**`, `**Как получить:**`, `**Как получить (из кода):**`, `**Прямое создание:**` и `**Унаследовано от:**`.\n");
+        sb.AppendLine("> Используй указанные `Namespace` для добавления в `using`. Строка `**Уровень API:**` отделяет прикладной Macro DSL (доступно внутри MacroProvider) от низкоуровневого Core Open API; пометка `Core Open API (генерация модели данных)` — это типы-конструкторы (Builder/Factory), через которые собирается модель данных. Строка `**Область API:**` задаёт вторую независимую ось: `structure` — администрирование модели данных, `object` — работа с пользовательскими объектами, `both` — общее для обеих задач. Пометка [RU: …] — русскоязычный алиас метода или свойства, найденный зеркалированием по идентичному тексту `<summary>` в XML-документации; [RU only] — член, существующий только в русскоязычном алиасе; [унаследовано] — член, полученный от базового класса коллекции макромодели. Каждый метод выводится отдельной секцией `#### [Method]`, каждый конструктор — секцией `#### [Constructor]`; в чанке доступны строки `**Алиасы:**`, `**RU only**`, `**Async**`, `**Возвращает:**` (выводится только когда текст `<returns>` описывает результат, а не пересказывает summary), `**Назначение:**`, `**Ключевые слова:**`, `**Как получить:**`, `**Как получить (из кода):**`, `**Прямое создание:**` и `**Унаследовано от:**`.\n");
+
+        // Раздел-разделитель и реестр сценариев идут ДО первого `## Сборка:`:
+        // сценарий — это отдельная секция верхнего уровня, и внутри блоков типов
+        // он попал бы в чужой чанк, разорвав разметку RAG.
+        if (EmitDomainMarkers)
+        {
+            sb.AppendLine($"- **Область API документа:** {DomainBoth}");
+            sb.AppendLine();
+
+            foreach (var guideLine in DomainGuideSection)
+                sb.AppendLine(guideLine);
+        }
 
         // Курируемые сценарии генерации модели данных — раньше говорящий запрос
         // «Создать справочник» / «Создать тип объекта» не имел ни одной лексической точки
         // опоры в справочнике: описания builder-типов сформулированы через «создает экземпляр
         // класса», и векторный поиск не выводил их в топ.
-        foreach (var scenarioLine in EntryPointScenarios)
-            sb.AppendLine(scenarioLine);
+        // Секции рендерятся из реестра: тот же реестр затем валидируется рефлексией,
+        // поэтому текст сценария и проверяемые ссылки не могут разъехаться.
+        var skippedScenarios = new List<string>();
+        var knownScenarioIds = new HashSet<string>(StringComparer.Ordinal);
+
+        // Границы секции сценариев в буфере. Валидация ссылок возможна только после
+        // загрузки всех сборок, то есть уже после того, как текст секции записан.
+        // Запомненные границы позволяют перерисовать секцию без сценариев, у которых
+        // не нашлась точка входа, не перестраивая весь документ.
+        int scenarioStart = sb.Length;
+        int scenarioEnd = scenarioStart;
+        if (EmitDomainMarkers)
+        {
+            BuildScenarioSections(sb, skippedScenarios, knownScenarioIds, null);
+            scenarioEnd = sb.Length;
+        }
+
+        // Индекс «полное имя типа → Type» по всем обрабатываемым сборкам. Нужен для двух
+        // проверок, которые нельзя выполнить внутри цикла по одной сборке: валидация ссылок
+        // реестра сценариев и валидация явных таблиц домена. Обе обязаны видеть все сборки
+        // сразу, иначе ссылка на тип из второй сборки считалась бы несуществующей.
+        var typeIndex = new Dictionary<string, Type>(StringComparer.Ordinal);
+
+        // Перечисления, выведенные в справочник: набор общий для всех сборок, чтобы
+        // одно и то же перечисление не появилось дважды в разных секциях.
+        var emittedEnums = new HashSet<string>(StringComparer.Ordinal);
+
+        // Итоговое распределение по областям и уровням API — для консольной сводки (§5.2)
+        // и для манифеста (§11).
+        var domainCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var levelCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        // Карта «builder-тип → сценарий, для которого его конструктор является точкой входа».
+        var ctorEntryPointScenarios = BuildCtorEntryPointScenarios();
+
+        // Предупреждения о неклассифицированных типах и членах печатаются один раз
+        // на полное имя: иначе консоль утонула бы в повторах по каждому вызову.
+        var domainWarned = new HashSet<string>(StringComparer.Ordinal);
 
         int totalTypes = 0;
 
@@ -191,6 +986,7 @@ public class ApiDumper
                                 // Collection, а ParameterGroupBuilder+ParameterGroupCollection
                                 // вместе с ним терял методы CanAddItem/CanRemoveItem.
                                 (IsBuilderRelatedType(t) ||
+                                 IsScenarioReferencedType(t) ||
                                  (!t.Name.EndsWith("Collection") &&
                                   !t.Name.EndsWith("Description") &&
                                   !t.Name.EndsWith("Dto") &&
@@ -216,8 +1012,25 @@ public class ApiDumper
                 var builderConsumers = new Dictionary<string, List<string>>(StringComparer.Ordinal);
                 BuildBuilderLinkMaps(types, builderCreators, builderConsumers);
 
+                // Индекс пополняется до обхода: к моменту валидации сценариев он должен
+                // содержать типы всех сборок, а не только той, что обрабатывается сейчас.
+                foreach (var indexed in types)
+                {
+                    string indexedName = indexed.FullName ?? indexed.Name;
+                    if (!typeIndex.ContainsKey(indexedName))
+                        typeIndex[indexedName] = indexed;
+                }
+
+                // Перечисления собираются по тем же типам, что попадут в справочник:
+                // это гарантирует, что описанные значения действительно используются
+                // в приведённых рядом сигнатурах (§9, п. 1).
+                var enumCandidates = new HashSet<Type>();
+
                 foreach (var type in types)
                 {
+                    if (EmitDomainMarkers)
+                        CollectReferencedEnums(type, enumCandidates, skippedNamespaces);
+
                     // 1. Свойства
                     var allProps = type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly).ToList();
                     var engProps = allProps.Where(p => !Regex.IsMatch(p.Name, @"\p{IsCyrillic}")).ToList();
@@ -442,15 +1255,33 @@ public class ApiDumper
                     // Явно отделяем прикладной Macro DSL от низкоуровневого Core Open API.
                     // Для builder/factory-типов уровень уточняется: это низкоуровневый Core,
                     // но именно через него собирается модель данных, о чём поиск должен знать.
-                    string apiLevel = IsMacroDslType(type)
-                        ? "Macro DSL (доступно внутри MacroProvider)"
-                        : IsBuilderRelatedType(type)
-                            ? "Core Open API (генерация модели данных)"
-                            : "Core Open API";
+                    string apiLevel = DescribeApiLevel(type);
                     sb.AppendLine($"- **Уровень API:** {apiLevel}");
+
+                    // Вторая, независимая ось: к какой задаче относится тип — администрирование
+                    // модели данных или работа с пользовательскими объектами (§5.1).
+                    string typeDomain = EmitDomainMarkers ? ResolveTypeDomain(type, domainWarned) : null;
+                    if (EmitDomainMarkers)
+                    {
+                        sb.AppendLine($"- **Область API:** {typeDomain}");
+                        domainCounts[typeDomain] = CountOf(domainCounts, typeDomain) + 1;
+                        string levelKey = IsMacroDslType(type) ? "macro" : "core";
+                        levelCounts[levelKey] = CountOf(levelCounts, levelKey) + 1;
+                    }
 
                     if (!string.IsNullOrEmpty(typeSummary))
                         sb.AppendLine($"- **Описание:** {typeSummary}");
+
+                    // Псевдо-перечисления (`ParameterGroupType`, `ParameterType`) объявлены
+                    // классами со статическими полями-значениями. Без строки «Значения»
+                    // сценарий создания табличной части 1:N не собирается: читатель не видит,
+                    // что в конструктор ParameterGroupBuilder передаётся TableOneToMany.
+                    if (EmitDomainMarkers && Array.IndexOf(PseudoEnumTypes, type.FullName ?? type.Name) >= 0)
+                    {
+                        var pseudoValues = GetEnumValueNames(type);
+                        if (pseudoValues.Any())
+                            sb.AppendLine($"- **Значения:** {string.Join(", ", pseudoValues.Select(v => "`" + v + "`"))}");
+                    }
 
                     // Типы-конструкторы модели данных описываются в XML-документации без слов
                     // «создать»/«справочник», поэтому в блок добавляются назначение и ключевые
@@ -509,6 +1340,12 @@ public class ApiDumper
                             sb.AppendLine($"- **Полное имя:** `{c.FullName}`");
                             sb.AppendLine($"- **Тип:** `{type.Name}`");
 
+                            // Область API дублируется в чанке конструктора: RAG-сплиттер
+                            // не сохраняет родительский заголовок, и без этой строки
+                            // конструктор терял привязку к задаче (модель или данные).
+                            if (EmitDomainMarkers)
+                                sb.AppendLine($"- **Область API:** {ResolveMemberDomain(type, null, domainWarned)}");
+
                             if (!string.IsNullOrEmpty(c.Summary))
                                 sb.AppendLine($"- **Описание:** {c.Summary}");
 
@@ -531,7 +1368,15 @@ public class ApiDumper
 
                             string keywordLine = BuildConstructorKeywords(type, c);
                             if (!string.IsNullOrEmpty(keywordLine))
+                            {
+                                // Конструктор, являющийся единственной точкой входа сценария,
+                                // получает id сценария и его фразы: иначе запрос «создать тип
+                                // объекта» находит описание типа, но не его конструктор (§10).
+                                if (EmitDomainMarkers)
+                                    keywordLine = AppendScenarioKeywords(keywordLine, type, ctorEntryPointScenarios);
+
                                 sb.AppendLine($"- **Ключевые слова:** {keywordLine}");
+                            }
 
                             sb.AppendLine();
                         }
@@ -553,6 +1398,15 @@ public class ApiDumper
                                 sb.AppendLine($"- **Тип:** `{type.Name}` — {typeSummary}");
                             else
                                 sb.AppendLine($"- **Тип:** `{type.Name}`");
+
+                            // Область и уровень дублируются в чанке метода: сплиттер RAG
+                            // не сохраняет родительский заголовок, поэтому без этих строк
+                            // метод терял и задачу, и уровень API при извлечении фрагмента.
+                            if (EmitDomainMarkers)
+                            {
+                                sb.AppendLine($"- **Область API:** {ResolveMemberDomain(type, m.Name, domainWarned)}");
+                                sb.AppendLine($"- **Уровень API:** {DescribeApiLevel(type)}");
+                            }
 
                             if (!string.IsNullOrEmpty(m.Summary))
                                 sb.AppendLine($"- **Описание:** {m.Summary}");
@@ -603,6 +1457,28 @@ public class ApiDumper
                     addedForDll++;
                 }
 
+                // Перечисления выводятся последними в секции сборки: это сохраняет
+                // детерминированный порядок и не разрывает существующую последовательность
+                // блоков типов, которая уже служит baseline для контроля диффа.
+                if (EmitDomainMarkers)
+                {
+                    var ownEnums = enumCandidates
+                        .Where(t => (t.Assembly.GetName().Name + ".dll") == dllName)
+                        .ToList();
+
+                    // Псевдо-перечисления объявлены классами, поэтому в кандидаты из сигнатур
+                    // они не попадают — добавляются отдельно по явной таблице (§9, п. 1).
+                    foreach (var pseudoName in PseudoEnumTypes)
+                    {
+                        Type pseudo;
+                        if (typeIndex.TryGetValue(pseudoName, out pseudo) &&
+                            (pseudo.Assembly.GetName().Name + ".dll") == dllName)
+                            ownEnums.Add(pseudo);
+                    }
+
+                    EmitEnumBlocks(sb, dllName, ownEnums, emittedEnums, xmlDoc);
+                }
+
                 Console.WriteLine($"[Успешно] {dllName}: классов: {addedForDll}");
                 totalTypes += addedForDll;
             }
@@ -610,6 +1486,40 @@ public class ApiDumper
             {
                 Console.WriteLine($"[Ошибка] {dllName}: {ex.Message}");
             }
+        }
+
+        // Валидация выполняется после загрузки всех сборок и ДО записи файла: индекс типов
+        // к этому моменту полон, а решение о пропуске сценария ещё можно учесть в выводе.
+        if (EmitDomainMarkers)
+        {
+            ValidateDomainOverrideTables(typeIndex);
+
+            var scenarioProblems = ValidateScenarioMembers(typeIndex);
+
+            // Сценарий, у которого не нашлась точка входа, из вывода удаляется (§1.2):
+            // ссылка на несуществующий член API вводила бы RAG в заблуждение сильнее,
+            // чем отсутствие сценария. Секция перерисовывается по тому же реестру
+            // с явным списком исключений, поэтому остальные сценарии не меняются.
+            var droppedScenarios = new HashSet<string>(
+                scenarioProblems
+                    .Where(p => p.StartsWith("пропущен ", StringComparison.Ordinal))
+                    .Select(p => p.Substring("пропущен ".Length).Split(':')[0]),
+                StringComparer.Ordinal);
+
+            if (droppedScenarios.Count > 0)
+            {
+                sb.Remove(scenarioStart, scenarioEnd - scenarioStart);
+                // Набор выведенных id пересобирается с нуля: первый проход включал и те
+                // сценарии, что теперь отброшены, и манифест описал бы несуществующую секцию.
+                knownScenarioIds.Clear();
+                skippedScenarios.Clear();
+                BuildScenarioSections(sb, skippedScenarios, knownScenarioIds, droppedScenarios);
+                Console.WriteLine($" [Сценарии] Сценариев пропущено целиком: {droppedScenarios.Count}");
+            }
+
+            Console.WriteLine($" [Область API] Распределение типов — {DomainStructure}: {CountOf(domainCounts, DomainStructure)}, " +
+                              $"{DomainObject}: {CountOf(domainCounts, DomainObject)}, " +
+                              $"{DomainBoth}: {CountOf(domainCounts, DomainBoth)}");
         }
 
         string projectDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", ".."));
@@ -627,6 +1537,781 @@ public class ApiDumper
         Console.WriteLine($"\n Готово! Всего классов: {totalTypes}");
         Console.WriteLine($" Режим очистки шума (CleanRagNoise): {CleanRagNoise}");
         Console.WriteLine($" Файл сохранён: {outPath}");
+
+        // Манифест пишется последним: он описывает то, что уже выведено, поэтому
+        // его содержимое не может разойтись с фактическим справочником.
+        if (EmitDomainMarkers && EmitScopeManifest)
+            WriteScopeManifest(projectDir, domainCounts, levelCounts, knownScenarioIds);
+    }
+
+    /// <summary>
+    /// Формирует секцию реестра сценариев (## Сценарии (реестр) + блоки ### [Scenario]).
+    ///
+    /// Вызывается ДО обхода сборок: сценарий — секция верхнего уровня, и внутри блоков
+    /// типов он разорвал бы чужие чанки. Порядок строго по id — это требование
+    /// детерминированности вывода: реестр объявлен в исходнике вручную, и без сортировки
+    /// порядок зависел бы от порядка правок в файле.
+    /// </summary>
+    /// <param name="sb">Буфер вывода справочника.</param>
+    /// <param name="skipped">Коллекция, куда попадут причины отброшенных сценариев.</param>
+    /// <param name="knownIds">Множество id выведенных сценариев (нужно для отчёта).</param>
+    /// <param name="excluded">
+    /// Сценарии, которые нужно не выводить (точка входа не подтверждена рефлексией).
+    /// Пусто при первом проходе, когда валидация ещё не выполнялась.
+    /// </param>
+    private static void BuildScenarioSections(
+        StringBuilder sb,
+        List<string> skipped,
+        HashSet<string> knownIds,
+        HashSet<string> excluded)
+    {
+        sb.AppendLine("## Сценарии (реестр)");
+        sb.AppendLine();
+        sb.AppendLine(ScenarioRegistryIntro);
+        sb.AppendLine();
+
+        foreach (var scenario in ScenarioRegistry.OrderBy(s => s.Id, StringComparer.Ordinal))
+        {
+            // Сценарий без точки входа или без описания бессмысленен: молчаливый
+            // пропуск скрыл бы ошибку в реестре, поэтому причина попадает в консоль.
+            if (string.IsNullOrEmpty(scenario.EntryPoint))
+            {
+                skipped.Add($"{scenario.Id}: не задана точка входа");
+                continue;
+            }
+
+            // Сценарий, точка входа которого не подтверждена рефлексией, в справочник
+            // не попадает: причина уже напечатана валидацией.
+            if (excluded != null && excluded.Contains(scenario.Id))
+                continue;
+
+            knownIds.Add(scenario.Id);
+
+            sb.AppendLine($"### [Scenario] {scenario.Id}");
+            sb.AppendLine($"- **Сценарий:** {scenario.Title}");
+            sb.AppendLine($"- **Область API:** {scenario.Domain}");
+            sb.AppendLine($"- **Уровень API:** {scenario.Level}");
+            sb.AppendLine($"- **Точка входа:** {scenario.EntryPoint}");
+
+            if (!string.IsNullOrEmpty(scenario.Result))
+                sb.AppendLine($"- **Результат:** `{scenario.Result}`");
+
+            if (scenario.Next != null && scenario.Next.Any())
+                sb.AppendLine($"- **Далее:** {string.Join("; ", scenario.Next)}");
+
+            if (scenario.Keywords != null && scenario.Keywords.Any())
+                sb.AppendLine($"- **Ключевые слова:** {string.Join(", ", scenario.Keywords)}");
+
+            // Поле обязательно для пар «тип объекта / объект», «список объектов /
+            // объект в списке», «параметр модели / значение параметра» (§3).
+            if (scenario.ConfusableWith != null && scenario.ConfusableWith.Any())
+                sb.AppendLine($"- **Не путать с:** {string.Join("; ", scenario.ConfusableWith)}");
+
+            sb.AppendLine("- **Проверено по DLL:** да");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine(ScenarioRegistryFooter);
+        sb.AppendLine();
+    }
+
+    /// <summary>
+    /// Определяет область API для типа: `structure`, `object` или `both` (§5.1).
+    ///
+    /// Порядок применения строго задан: явная таблица → правило по пространству имён →
+    /// правило по имени → `both`. Именно такой порядок не даёт правилу по имени
+    /// («Object» в `ClassObject`) перебить явную таблицу, где `ClassObject` — это structure.
+    /// </summary>
+    /// <param name="type">Тип, для которого определяется домен.</param>
+    /// <param name="warned">Множество уже выданных предупреждений (без дублей).</param>
+    /// <returns>Одно из значений DomainStructure/DomainObject/DomainBoth.</returns>
+    private static string ResolveTypeDomain(Type type, HashSet<string> warned)
+    {
+        if (type == null)
+            return DomainBoth;
+
+        string fullName = type.FullName ?? type.Name;
+
+        string domain;
+        if (ExplicitTypeDomains.TryGetValue(fullName, out domain))
+            return domain;
+
+        // Ключ таблицы для вложенных типов записан через имя сборки, а полное имя
+        // вложенного типа содержит «+»: ClassObjectBuilder+ParameterGroupCollection.
+        // Домен объявляющего типа — правильный ответ и для вложенного типа.
+        if (type.DeclaringType != null &&
+            ExplicitTypeDomains.TryGetValue(type.DeclaringType.FullName ?? type.DeclaringType.Name, out domain))
+            return domain;
+
+        string ns = type.Namespace ?? "";
+
+        if (StructureNamespacePrefixes.Any(p => ns == p || ns.StartsWith(p + ".", StringComparison.Ordinal)))
+            return DomainStructure;
+
+        if (ObjectNamespacePrefixes.Any(p => ns == p || ns.StartsWith(p + ".", StringComparison.Ordinal)))
+            return DomainObject;
+
+        // Правило по имени — только если namespace ответа не дал.
+        string name = SimpleTypeName(fullName) ?? type.Name;
+        if (name.Contains("Builder") || name.Contains("Factory") ||
+            name.Contains("Structure") || name.Contains("Schema") || name.Contains("Metadata"))
+            return DomainStructure;
+
+        if (name.Contains("Object") || name.Contains("Reference") || name.Contains("Parameter") ||
+            name.Contains("Link") || name.Contains("Revision") || name.Contains("File"))
+            return DomainObject;
+
+        // Неопределённый тип осознанно попадает в `both`, а не в `object`:
+        // при фильтрации по области ничего не должно потеряться.
+        if (warned != null && WarnUnknownTypeDomains && warned.Add(fullName))
+            Console.WriteLine($" [Область API] Тип не классифицирован явно, используется both: {fullName}");
+
+        return DomainBoth;
+    }
+
+    /// <summary>
+    /// Определяет область API для члена типа (§5.2).
+    ///
+    /// Домен члена по умолчанию равен домену объявляющего типа; переопределяется
+    /// явной таблицей `Type.Member` и правилом по имени. Правило по имени применяется
+    /// ПОСЛЕ явной таблицы, иначе `ClassObject` внутри имени метода перебил бы
+    /// зафиксированный домен `Reference.CreateReferenceObject`.
+    /// </summary>
+    /// <param name="type">Объявляющий тип члена.</param>
+    /// <param name="memberName">Имя метода, свойства или конструктора (null для конструктора).</param>
+    /// <param name="warned">Множество уже выданных предупреждений (без дублей).</param>
+    /// <returns>Одно из значений DomainStructure/DomainObject/DomainBoth.</returns>
+    private static string ResolveMemberDomain(Type type, string memberName, HashSet<string> warned)
+    {
+        if (type == null)
+            return DomainBoth;
+
+        string typeFullName = type.FullName ?? type.Name;
+        string baseDomain = ResolveTypeDomain(type, warned);
+
+        if (string.IsNullOrEmpty(memberName))
+            return baseDomain;
+
+        string key = typeFullName + "." + memberName;
+        string domain;
+        if (ExplicitMemberDomains.TryGetValue(key, out domain))
+            return domain;
+
+        // Явная таблица для базового типа действует и на унаследованный член:
+        // Reference.CreateReferenceObject объявлен именно на Reference, но правило
+        // «домен типа» обязано работать и для переопределений в наследниках.
+        for (Type baseType = type.BaseType; baseType != null; baseType = baseType.BaseType)
+        {
+            string baseKey = (baseType.FullName ?? baseType.Name) + "." + memberName;
+            if (ExplicitMemberDomains.TryGetValue(baseKey, out domain))
+                return domain;
+        }
+
+        if (memberName.IndexOf("Structure", StringComparison.Ordinal) >= 0 ||
+            memberName.IndexOf("Schema", StringComparison.Ordinal) >= 0 ||
+            memberName.IndexOf("ClassObject", StringComparison.Ordinal) >= 0 ||
+            memberName.IndexOf("ParameterInfo", StringComparison.Ordinal) >= 0 ||
+            memberName.IndexOf("LinkGroup", StringComparison.Ordinal) >= 0 ||
+            memberName.IndexOf("UniqueIndex", StringComparison.Ordinal) >= 0)
+            return DomainStructure;
+
+        return baseDomain;
+    }
+
+    /// <summary>
+    /// Проверяет, что каждая запись явных таблиц домена существует в реальных сборках.
+    ///
+    /// Требование §5.2, п. 5: явная таблица приоритетнее всех правил, поэтому ошибка
+    /// в её ключе тихо «повисала» бы в коде — правило никогда не срабатывало бы,
+    /// и никто об этом не узнал бы. Проверка печатает предупреждение по каждой
+    /// несуществующей записи.
+    /// </summary>
+    /// <param name="typeIndex">Индекс «полное имя типа → Type» по всем загруженным сборкам.</param>
+    private static void ValidateDomainOverrideTables(Dictionary<string, Type> typeIndex)
+    {
+        int missing = 0;
+
+        foreach (var pair in ExplicitTypeDomains)
+        {
+            if (!typeIndex.ContainsKey(pair.Key))
+            {
+                Console.WriteLine($" [Область API] Предупреждение: запись таблицы типов не найдена — {pair.Key}");
+                missing++;
+            }
+        }
+
+        foreach (var pair in ExplicitMemberDomains)
+        {
+            int lastDot = pair.Key.LastIndexOf('.');
+            if (lastDot <= 0)
+                continue;
+
+            string typeName = pair.Key.Substring(0, lastDot);
+            string memberName = pair.Key.Substring(lastDot + 1);
+
+            Type owner;
+            if (!typeIndex.TryGetValue(typeName, out owner))
+            {
+                Console.WriteLine($" [Область API] Предупреждение: запись таблицы членов ссылается на неизвестный тип — {pair.Key}");
+                missing++;
+                continue;
+            }
+
+            if (!HasPublicMember(owner, memberName))
+            {
+                Console.WriteLine($" [Область API] Предупреждение: запись таблицы членов не найдена — {pair.Key}");
+                missing++;
+            }
+        }
+
+        Console.WriteLine($" [Область API] Проверка явных таблиц: записей {ExplicitTypeDomains.Count + ExplicitMemberDomains.Count}, не найдено {missing}");
+    }
+
+    /// <summary>
+    /// Проверяет существование публичного члена у типа: метода, свойства или поля.
+    /// Просматриваются и унаследованные члены — таблица может ссылаться на член,
+    /// объявленный в базовом классе.
+    /// </summary>
+    private static bool HasPublicMember(Type type, string memberName)
+    {
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.Instance |
+                                   BindingFlags.Static | BindingFlags.FlattenHierarchy;
+
+        try
+        {
+            // Конструктор помечается в реестре как "#ctor" и через GetMethods не находится:
+            // рефлексия отдаёт его только отдельным списком конструкторов.
+            if (memberName == null || memberName == "#ctor" || memberName.EndsWith(".#ctor", StringComparison.Ordinal))
+                return type.GetConstructors(BindingFlags.Public | BindingFlags.Instance).Length > 0;
+
+            if (type.GetMethods(flags).Any(m => m.Name == memberName))
+                return true;
+
+            if (type.GetProperties(flags).Any(p => p.Name == memberName))
+                return true;
+
+            if (type.GetFields(flags).Any(f => f.Name == memberName))
+                return true;
+        }
+        catch (Exception)
+        {
+            // Часть типов сторонних сборок не отдаёт метаданные: такой член
+            // считается непроверяемым, а не отсутствующим.
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Проверяет все ссылки реестра сценариев рефлексией по загруженным сборкам и
+    /// возвращает список сценариев, у которых не найдена ТОЧКА ВХОДА (§4).
+    ///
+    /// Разделение важно: отсутствие продолжения («Далее») — не повод выбрасывать
+    /// сценарий, у него достаточно убрать один пункт. Пропуск целиком оправдан только
+    /// тогда, когда сценарий не с чего начать.
+    /// </summary>
+    /// <param name="typeIndex">Индекс «полное имя типа → Type» по всем загруженным сборкам.</param>
+    /// <returns>Список причин пропуска сценариев; пустой, если пропусков нет.</returns>
+    private static List<string> ValidateScenarioMembers(Dictionary<string, Type> typeIndex)
+    {
+        var skippedScenarios = new List<string>();
+        int checkedRefs = 0;
+        int missingRefs = 0;
+
+        foreach (var scenario in ScenarioRegistry.OrderBy(s => s.Id, StringComparer.Ordinal))
+        {
+            if (scenario.Members == null || !scenario.Members.Any())
+                continue;
+
+            bool entryPointFound = false;
+
+            foreach (var member in scenario.Members)
+            {
+                checkedRefs++;
+
+                Type owner;
+                if (!typeIndex.TryGetValue(member.TypeFullName, out owner) || !HasPublicMember(owner, member.Member))
+                {
+                    missingRefs++;
+                    if (!entryPointFound && IsEntryPoint(scenario, member))
+                    {
+                        // Точка входа не найдена — сценарий выводить нельзя: он отправил бы
+                        // читателя в несуществующий член API.
+                        skippedScenarios.Add($"пропущен {scenario.Id}: не найден {member.Display}");
+                    }
+                    else
+                    {
+                        skippedScenarios.Add($"уточнение {scenario.Id}: не найден {member.Display}");
+                    }
+                    continue;
+                }
+
+                if (IsEntryPoint(scenario, member))
+                    entryPointFound = true;
+            }
+        }
+
+        Console.WriteLine($" [Сценарии] всего: {ScenarioRegistry.Length}, проверено: {checkedRefs} ссылка, пропущено: {missingRefs}");
+        foreach (var line in skippedScenarios)
+            Console.WriteLine($" [Сценарии] {line}");
+
+        return skippedScenarios;
+    }
+
+    /// <summary>
+    /// Определяет, является ли проверяемый член точкой входа сценария.
+    ///
+    /// Точка входа — это первый член списка Members без имени (конструктор) либо член,
+    /// названный в строке «Точка входа» сценария. Обе эвристики применяются вместе:
+    /// у сценария создания модели данных точка входа — всегда конструктор builder-типа,
+    /// а у сценария работы с данными — именованный метод.
+    /// </summary>
+    private static bool IsEntryPoint(ScenarioDefinition scenario, ScenarioMember member)
+    {
+        if (member.Member == null)
+            return scenario.Members.Length > 0 && ReferenceEquals(scenario.Members[0], member);
+
+        if (string.IsNullOrEmpty(scenario.EntryPoint))
+            return false;
+
+        // Имя члена ищется как подстрока в тексте точки входа: текст содержит
+        // проверенные сигнатуры, поэтому совпадение имени означает, что член там упомянут.
+        return scenario.EntryPoint.IndexOf("." + member.Member + "(", StringComparison.Ordinal) >= 0 ||
+               scenario.EntryPoint.IndexOf("." + member.Member + "`", StringComparison.Ordinal) >= 0;
+    }
+
+    /// <summary>
+    /// Формирует список проверяемых ссылок сценария для отчёта о валидации.
+    /// </summary>
+    private static string DescribeScenarioMembers(ScenarioDefinition scenario)
+    {
+        if (scenario.Members == null || !scenario.Members.Any())
+            return "нет ссылок";
+
+        return string.Join(", ", scenario.Members.Select(m => m.Display));
+    }
+
+    /// <summary>
+    /// Проверка домен-таблиц и сценариев выполняется только при включённой оси:
+    /// при EmitDomainMarkers == false генератор должен работать как прежде,
+    /// в том числе не тратить время на обход типов и не печатать новые строки.
+    /// </summary>
+    private static readonly bool WarnUnknownTypeDomains = false;
+
+    /// <summary>
+    /// Типы-перечисления платформы, которые в сборке объявлены классами со статическими
+    /// полями-значениями (`ParameterGroupType`, `ParameterType`), но по смыслу являются
+    /// перечислениями: их значения используются как `ParameterGroupType.TableOneToMany`.
+    ///
+    /// Без них сценарий создания табличной части 1:N не собирается: в справочнике нет
+    /// ни одного описания значения `TableOneToMany`, и читатель не может понять,
+    /// что передать в конструктор `ParameterGroupBuilder`.
+    /// </summary>
+    private static readonly string[] PseudoEnumTypes = {
+        "TFlex.DOCs.Model.Structure.ParameterGroupType",
+        "TFlex.DOCs.Model.Structure.ParameterType"
+    };
+
+    /// <summary>
+    /// Возвращает список значений перечисления в порядке объявления.
+    ///
+    /// Для настоящего `enum` используется `Enum.GetNames`. Для псевдо-перечислений
+    /// (`ParameterGroupType`, `ParameterType`) значения читаются из публичных статических
+    /// полей самого типа и сортируются по `MetadataToken`: рефлексия отдаёт такие поля
+    /// в порядке хеш-таблицы, а токен метаданных сохраняет порядок объявления в исходнике.
+    /// </summary>
+    /// <param name="type">Тип-перечисление или псевдо-перечисление.</param>
+    /// <returns>Значения в порядке объявления; пустой список, если тип не является перечислением.</returns>
+    private static List<string> GetEnumValueNames(Type type)
+    {
+        var values = new List<string>();
+        if (type == null)
+            return values;
+
+        if (type.IsEnum)
+        {
+            try
+            {
+                values.AddRange(Enum.GetNames(type));
+            }
+            catch (Exception ex)
+            {
+                // Перечисление из сборки, метаданные которой недоступны, не должно
+                // обрушивать обработку всей сборки: блок просто не выводится.
+                Console.WriteLine($" [Перечисления] Пропущено {type.FullName}: {ex.Message}");
+            }
+
+            return values;
+        }
+
+        if (Array.IndexOf(PseudoEnumTypes, type.FullName ?? type.Name) < 0)
+            return values;
+
+        try
+        {
+            values.AddRange(type
+                .GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
+                .Where(f => f.FieldType == type)
+                .OrderBy(f => f.MetadataToken)
+                .Select(f => f.Name));
+        }
+        catch (Exception)
+        {
+            // Метаданные недоступны — значений нет, блок остаётся без строки «Значения».
+        }
+
+        return values;
+    }
+
+    /// <summary>
+    /// Выводит блоки найденных перечислений после блоков типов своей сборки (§9).
+    ///
+    /// Зачем это нужно: генератор отбирает только классы и интерфейсы, поэтому
+    /// `ParameterGroupType.TableOneToMany` и `ParameterType.NVarChar` в справочнике
+    /// не описаны вовсе, и сценарий создания табличной части не собирается.
+    /// Блоки печатаются последними в секции сборки — так порядок остаётся детерминированным
+    /// и не разрывает уже существующую последовательность блоков типов.
+    /// </summary>
+    /// <param name="sb">Буфер вывода.</param>
+    /// <param name="dllName">Имя обрабатываемой сборки (для строки Assembly).</param>
+    /// <param name="candidates">Типы-кандидаты, собранные из сигнатур отобранных членов.</param>
+    /// <param name="alreadyEmitted">Полные имена уже выведенных перечислений (без дублей между сборками).</param>
+    /// <param name="xmlDoc">Поставщик XML-документации (может быть null).</param>
+    /// <returns>Количество выведенных блоков перечислений.</returns>
+    private static int EmitEnumBlocks(
+        StringBuilder sb,
+        string dllName,
+        IEnumerable<Type> candidates,
+        HashSet<string> alreadyEmitted,
+        XmlDocProvider xmlDoc)
+    {
+        int emitted = 0;
+
+        foreach (var enumType in candidates
+            .Where(t => t != null)
+            // Только настоящие перечисления: псевдо-перечисления (`ParameterGroupType`,
+            // `ParameterType`) объявлены классами и уже выводятся обычным блоком типа,
+            // поэтому их значения добавляются в этот существующий блок, а не дублируются
+            // вторым заголовком `### [Type]` с тем же полным именем.
+            .Where(t => t.IsEnum)
+            .GroupBy(t => t.FullName ?? t.Name, StringComparer.Ordinal)
+            .Select(g => g.First())
+            .OrderBy(t => t.FullName ?? t.Name, StringComparer.Ordinal))
+        {
+            string fullName = enumType.FullName ?? enumType.Name;
+            if (!alreadyEmitted.Add(fullName))
+                continue;
+
+            var values = GetEnumValueNames(enumType);
+            // Перечисление без значений в справочник не попадает: блок с пустой строкой
+            // «Значения» бесполезен для RAG и только засоряет выдачу.
+            if (!values.Any())
+                continue;
+
+            sb.AppendLine($"### [Type] {fullName}");
+            sb.AppendLine($"- **Namespace:** `{enumType.Namespace}`");
+            sb.AppendLine($"- **Assembly:** `{dllName}`");
+            sb.AppendLine($"- **Уровень API:** {DescribeApiLevel(enumType)}");
+            sb.AppendLine($"- **Область API:** {ResolveTypeDomain(enumType, null)}");
+
+            string summary = xmlDoc == null ? null : xmlDoc.GetTypeSummary(enumType);
+            sb.AppendLine(!string.IsNullOrEmpty(summary)
+                ? $"- **Описание:** {summary}"
+                : $"- **Описание:** Перечисление значений для работы с API T-FLEX DOCs: {enumType.Name}.");
+
+            // Значения — в порядке объявления, без XML-описаний (§9, п. 4).
+            sb.AppendLine($"- **Значения:** {string.Join(", ", values.Select(v => "`" + v + "`"))}");
+            sb.AppendLine();
+
+            emitted++;
+        }
+
+        return emitted;
+    }
+
+    /// <summary>
+    /// Определяет уровень API (`Macro DSL` / `Core Open API`) в едином виде для блоков
+    /// типов и перечислений: логика уровня не должна дублироваться и расходиться.
+    /// </summary>
+    private static string DescribeApiLevel(Type type)
+    {
+        if (IsMacroDslType(type))
+            return "Macro DSL (доступно внутри MacroProvider)";
+
+        return IsBuilderRelatedType(type)
+            ? "Core Open API (генерация модели данных)"
+            : "Core Open API";
+    }
+
+    /// <summary>
+    /// Добавляет в набор перечисление, если тип (или его generic-аргумент, или элемент
+    /// массива) является перечислением и относится к обрабатываемым сборкам (§9, п. 2).
+    ///
+    /// Системные и шумовые пространства имён отбрасываются: `System.DayOfWeek` в справочнике
+    /// API платформы не нужен и только раздувает выдачу.
+    /// </summary>
+    private static void AddEnumCandidate(HashSet<Type> target, Type candidate, string[] skipped)
+    {
+        if (target == null || candidate == null)
+            return;
+
+        if (candidate.IsArray)
+            candidate = candidate.GetElementType();
+
+        if (candidate == null)
+            return;
+
+        if (candidate.IsGenericType)
+        {
+            foreach (var argument in candidate.GetGenericArguments())
+                AddEnumCandidate(target, argument, skipped);
+            return;
+        }
+
+        if (!candidate.IsEnum || !candidate.IsPublic)
+            return;
+
+        // Generic-параметр с ограничением `where T : Enum` тоже отвечает IsEnum == true,
+        // но это не тип-перечисление: Enum.GetNames на нём падает с «Должен быть задан
+        // тип Enum». Такие параметры в справочник значений не попадают.
+        if (candidate.IsGenericParameter || candidate.ContainsGenericParameters)
+            return;
+
+        string ns = candidate.Namespace ?? "";
+        if (ns.StartsWith("System", StringComparison.Ordinal) || ns.Length == 0)
+            return;
+
+        if (skipped != null && skipped.Any(s => ns == s || ns.StartsWith(s + ".", StringComparison.Ordinal)))
+            return;
+
+        target.Add(candidate);
+    }
+
+    /// <summary>
+    /// Собирает перечисления, реально встречающиеся в сигнатурах отобранных членов типа:
+    /// типы свойств, возвращаемые типы и типы параметров методов и конструкторов (§9, п. 1).
+    /// </summary>
+    private static void CollectReferencedEnums(
+        Type type,
+        HashSet<Type> target,
+        string[] skippedNamespaces)
+    {
+        if (type == null)
+            return;
+
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.Instance |
+                                   BindingFlags.Static | BindingFlags.DeclaredOnly;
+
+        try
+        {
+            foreach (var property in type.GetProperties(flags))
+            {
+                AddEnumCandidate(target, property.PropertyType, skippedNamespaces);
+                foreach (var index in property.GetIndexParameters())
+                    AddEnumCandidate(target, index.ParameterType, skippedNamespaces);
+            }
+
+            foreach (var method in type.GetMethods(flags))
+            {
+                AddEnumCandidate(target, method.ReturnType, skippedNamespaces);
+                foreach (var parameter in method.GetParameters())
+                    AddEnumCandidate(target, parameter.ParameterType, skippedNamespaces);
+            }
+
+            foreach (var ctor in type.GetConstructors(flags))
+            {
+                foreach (var parameter in ctor.GetParameters())
+                    AddEnumCandidate(target, parameter.ParameterType, skippedNamespaces);
+            }
+        }
+        catch (Exception)
+        {
+            // Часть типов не отдаёт метаданные: перечисления такого типа просто
+            // не попадут в справочник, уже выведенные блоки от этого не пострадают.
+        }
+    }
+
+    /// <summary>
+    /// Определяет, является ли тип точкой входа сценария создания модели данных:
+    /// ключ — полное имя типа, значение — первый сценарий реестра, чья точка входа
+    /// начинается с конструктора этого типа.
+    ///
+    /// Нужно для §10: конструктор-единственная-точка-входа получает в «Ключевые слова»
+    /// id сценария и его фразы, иначе запрос «создать тип объекта» находит только
+    /// описание типа, но не его конструктор.
+    /// </summary>
+    private static Dictionary<string, ScenarioDefinition> BuildCtorEntryPointScenarios()
+    {
+        var map = new Dictionary<string, ScenarioDefinition>(StringComparer.Ordinal);
+
+        foreach (var scenario in ScenarioRegistry)
+        {
+            if (scenario.Members == null || scenario.Members.Length == 0)
+                continue;
+
+            var first = scenario.Members[0];
+            if (first.Member != null)
+                continue;
+
+            if (!map.ContainsKey(first.TypeFullName))
+                map[first.TypeFullName] = scenario;
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// Формирует ключевые слова конструктора-точки-входа: к обычным словам добавляются
+    /// id сценария и его ключевые фразы (§10).
+    /// </summary>
+    private static string AppendScenarioKeywords(
+        string keywordLine,
+        Type type,
+        Dictionary<string, ScenarioDefinition> ctorScenarios)
+    {
+        if (type == null || ctorScenarios == null)
+            return keywordLine;
+
+        ScenarioDefinition scenario;
+        if (!ctorScenarios.TryGetValue(type.FullName ?? type.Name, out scenario))
+            return keywordLine;
+
+        var extra = new List<string> { scenario.Id };
+        if (scenario.Keywords != null)
+            extra.AddRange(scenario.Keywords.Where(k => !string.IsNullOrEmpty(k)));
+
+        string addition = string.Join(", ", extra);
+        if (string.IsNullOrEmpty(keywordLine))
+            return "- **Ключевые слова:** " + addition;
+
+        return keywordLine + ", " + addition;
+    }
+
+    /// <summary>
+    /// Записывает компактный манифест области видимости `tflex_docs_api_scope.json`
+    /// рядом со справочником (§11).
+    ///
+    /// Манифест содержит только сценарии, явные переопределения и счётчики — без путей,
+    /// времени и полной карты типов, поэтому два прогона дают побайтово одинаковый файл.
+    /// JSON собирается вручную: это избавляет от зависимости от сериализатора и от
+    /// неопределённости в порядке ключей.
+    /// </summary>
+    /// <param name="projectDir">Каталог рядом со справочником.</param>
+    /// <param name="domainCounts">Итоговое распределение типов по областям API.</param>
+    /// <param name="levelCounts">Итоговое распределение типов по уровням API.</param>
+    private static void WriteScopeManifest(
+        string projectDir,
+        Dictionary<string, int> domainCounts,
+        Dictionary<string, int> levelCounts,
+        HashSet<string> emittedScenarioIds)
+    {
+        var json = new StringBuilder();
+        json.AppendLine("{");
+        json.AppendLine("  \"version\": 1,");
+        json.AppendLine($"  \"document_domain\": \"{DomainBoth}\",");
+        json.AppendLine("  \"scenarios\": [");
+
+        // В манифест попадают только фактически выведенные сценарии: иначе он описывал бы
+        // секцию, которой в справочнике нет, и расхождение было бы незаметно.
+        var scenarios = ScenarioRegistry
+            .Where(s => emittedScenarioIds == null || emittedScenarioIds.Contains(s.Id))
+            .OrderBy(s => s.Id, StringComparer.Ordinal)
+            .ToList();
+
+        for (int i = 0; i < scenarios.Count; i++)
+        {
+            var scenario = scenarios[i];
+            string comma = i == scenarios.Count - 1 ? "" : ",";
+            json.AppendLine($"    {{ \"id\": \"{scenario.Id}\", \"domain\": \"{scenario.Domain}\", \"level\": \"{scenario.Level}\" }}{comma}");
+        }
+
+        json.AppendLine("  ],");
+        json.AppendLine("  \"overrides\": {");
+
+        var overrides = ExplicitMemberDomains
+            .OrderBy(p => p.Key, StringComparer.Ordinal)
+            .ToList();
+
+        for (int i = 0; i < overrides.Count; i++)
+        {
+            string comma = i == overrides.Count - 1 ? "" : ",";
+            json.AppendLine($"    \"{overrides[i].Key}\": \"{overrides[i].Value}\"{comma}");
+        }
+
+        json.AppendLine("  },");
+        json.AppendLine("  \"counts\": {");
+        json.AppendLine($"    \"structure\": {CountOf(domainCounts, DomainStructure)},");
+        json.AppendLine($"    \"object\": {CountOf(domainCounts, DomainObject)},");
+        json.AppendLine($"    \"both\": {CountOf(domainCounts, DomainBoth)},");
+        json.AppendLine($"    \"macro\": {CountOf(levelCounts, "macro")},");
+        json.AppendLine($"    \"core\": {CountOf(levelCounts, "core")}");
+        json.AppendLine("  }");
+        json.AppendLine("}");
+
+        string scopePath = Path.Combine(projectDir, "tflex_docs_api_scope.json");
+        File.WriteAllText(
+            scopePath,
+            json.ToString(),
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+        );
+
+        Console.WriteLine($" Манифест области API сохранён: {scopePath}");
+    }
+
+    /// <summary>Безопасно читает счётчик из словаря: отсутствующий ключ означает ноль.</summary>
+    private static int CountOf(Dictionary<string, int> counts, string key)
+    {
+        if (counts == null)
+            return 0;
+
+        int value;
+        return counts.TryGetValue(key, out value) ? value : 0;
+    }
+
+    /// <summary>
+    /// Полные имена типов, на которые ссылается реестр сценариев или явные таблицы домена.
+    ///
+    /// Такие типы освобождаются от суффиксных фильтров имени (`Collection`, `Dto`, `Xml`…):
+    /// `TFlex.DOCs.Model.Parameters.ParameterCollection` отсекался по суффиксу `Collection`,
+    /// из-за чего сценарии чтения и заполнения параметра ссылались на отсутствующий в
+    /// справочнике тип. Ссылка реестра — более сильный признак нужности, чем суффикс имени.
+    /// </summary>
+    private static readonly HashSet<string> ScenarioReferencedTypeNames = BuildScenarioReferencedTypeNames();
+
+    /// <summary>Собирает имена типов, упомянутых в реестре сценариев и явных таблицах домена.</summary>
+    private static HashSet<string> BuildScenarioReferencedTypeNames()
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var key in ExplicitTypeDomains.Keys)
+            names.Add(key);
+
+        foreach (var scenario in ScenarioRegistry)
+        {
+            if (scenario.Members == null)
+                continue;
+
+            foreach (var member in scenario.Members)
+                names.Add(member.TypeFullName);
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// Проверяет, упомянут ли тип в реестре сценариев или в явных таблицах домена.
+    /// Для вложенных типов проверяется и объявляющий тип.
+    /// </summary>
+    private static bool IsScenarioReferencedType(Type type)
+    {
+        if (type == null)
+            return false;
+
+        if (ScenarioReferencedTypeNames.Contains(type.FullName ?? type.Name))
+            return true;
+
+        return type.DeclaringType != null && IsScenarioReferencedType(type.DeclaringType);
     }
 
     /// <summary>
@@ -806,6 +2491,13 @@ public class ApiDumper
         /// <summary>Полное имя метода с типами параметров для точного поиска и дедупликации.</summary>
         public string FullName;
 
+        /// <summary>
+        /// Простое имя метода без типа и параметров.
+        /// Нужно для классификации области API члена (§5.2): правила таблицы
+        /// переопределений заданы парой «полное имя типа + имя члена».
+        /// </summary>
+        public string Name;
+
         /// <summary>Описание из тега summary XML-документации; пусто, если описания нет.</summary>
         public string Summary;
 
@@ -892,6 +2584,7 @@ public class ApiDumper
             Signature = $"{FormatTypeName(method.ReturnType)} {method.Name}(" +
                         $"{string.Join(", ", parameters)})",
             FullName = $"{typeName}.{method.Name}({parameterTypes})",
+            Name = method.Name,
             Summary = summary,
             Alias = alias,
             Parameters = parameters,
@@ -1025,7 +2718,10 @@ public class ApiDumper
             case "ClassObjectBuilder": return "тип объектов (класс объектов) справочника";
             case "ParameterInfoBuilder": return "параметр справочника";
             case "ExtendedParameterInfoBuilder": return "расширенный параметр справочника";
-            case "ParameterGroupBuilder": return "группа параметров справочника";
+            // Формулировка уточнена: ParameterGroupBuilder собирает не только группу
+            // параметров, но и подчинённый список 1:N (табличную часть). Без этих слов
+            // запрос «создать список объектов» не находил точку входа сценария.
+            case "ParameterGroupBuilder": return "группа параметров или подчинённый список 1:N (табличная часть) справочника";
             case "ExtendedParametersStorageBuilder": return "хранилище параметров справочника";
             case "LinkGroupBuilder": return "группа связей типа объектов";
             case "UniqueIndexBuilder": return "индекс уникальности справочника";
@@ -1098,6 +2794,11 @@ public class ApiDumper
                 return new[]
                 {
                     "создать группу параметров, добавить группу параметров, создание группы параметров",
+                    // Добавлено для сценария create-object-list: пользователь формулирует
+                    // задачу как «создать список объектов» / «табличная часть», а не как
+                    // «создать группу параметров», и без этих фраз точка входа не находилась.
+                    "создать список объектов, подчинённый список, табличная часть, TableOneToMany",
+                    "create object list, one-to-many table",
                     "create parameter group, parameter group builder"
                 };
             case "UniqueIndexBuilder":
@@ -1159,7 +2860,7 @@ public class ApiDumper
             case "ClassObjectBuilder": return "тип объектов (класс объектов) справочника";
             case "ParameterInfoBuilder": return "параметр справочника";
             case "ExtendedParameterInfoBuilder": return "расширенный параметр справочника";
-            case "ParameterGroupBuilder": return "группа параметров справочника";
+            case "ParameterGroupBuilder": return "группа параметров или подчинённый список 1:N (табличная часть) справочника";
             case "ExtendedParametersStorageBuilder": return "хранилище параметров справочника";
             case "LinkGroupBuilder": return "группа связей типа объектов";
             case "UniqueIndexBuilder": return "индекс уникальности справочника";
